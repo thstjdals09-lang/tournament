@@ -67,32 +67,56 @@ const App = (() => {
       ${info.canBreak ? `<span class="chip warn">T${info.breakTable.number} 브레이크 가능</span>` : ''}`;
   }
 
-  /* ---------- 좌석 맵 (테이블 탭 전용) ---------- */
-  function seatMapHtml(s, t) {
+  /* ---------- 좌석 맵 (공용) mode: 'reg' = 테이블/좌석 사용 체크박스 + 배정 좌석 선택, 'tables' = 플레이어 조작 ---------- */
+  function seatMapHtml(s, t, mode) {
     const players = L.tablePlayers(s, t.id);
     const off = new Set(t.disabledSeats || []);
+    const usable = L.tableUsable(t);
     let seats = '';
     for (let i = 1; i <= t.seats; i++) {
       const p = players.find(x => x.seat === i);
       const isOff = off.has(i);
       const cls = ['seat'];
       if (isOff) cls.push('off'); else if (p) cls.push('occupied'); else cls.push('empty');
-      if (ui.moveMode) {
+      if (mode === 'reg') {
+        if (ui.regSeat && ui.regSeat.tableId === t.id && ui.regSeat.seat === i) cls.push('assigned');
+        if (ui.regManual && usable && !p && !isOff) cls.push('pick');
+      } else if (ui.moveMode) {
         if (p && p.id === ui.moveMode.playerId) cls.push('selected');
         else if (!isOff) cls.push('pick');
       }
       seats += `<div class="${cls.join(' ')}" data-table="${t.id}" data-seat="${i}" ${p ? `data-player="${p.id}"` : ''}>
         <span class="no">${i}</span>
-        <input type="checkbox" ${isOff ? '' : 'checked'} ${p ? 'disabled' : ''} title="좌석 사용" data-toggle="${t.id}:${i}">
+        ${mode === 'reg' ? `<input type="checkbox" ${isOff ? '' : 'checked'} ${p ? 'disabled' : ''} title="좌석 사용" data-toggle="${t.id}:${i}">` : ''}
         ${p ? `<div class="pname">${h(p.name)}</div><div class="pmeta">#${p.entryNo}</div>` : (isOff ? '사용 안함' : '빈 자리')}
       </div>`;
     }
     const open = t.status === 'open';
-    return `<div class="table-card ${open ? '' : 'closed'}" data-tcard="${t.id}">
-      <div class="table-head"><span class="name">T${t.number}</span><span class="cnt">${players.length}/${L.usableSeats(t)}</span>${open ? '' : '<span class="chip">닫힘</span>'}<span class="sp"></span>
-        ${open ? `<button class="sm ghost" data-close="${t.id}">브레이크</button>` : `<button class="sm ghost" data-reopen="${t.id}">다시 열기</button><button class="sm ghost" data-deltable="${t.id}">삭제</button>`}
-      </div>
+    const head = mode === 'reg'
+      ? `<label class="small" style="display:flex;align-items:center;gap:4px"><input type="checkbox" ${t.enabled === false ? '' : 'checked'} data-ttoggle="${t.id}" style="width:auto">테이블 사용</label>`
+      : (open ? `<button class="sm ghost" data-close="${t.id}">브레이크</button>` : `<button class="sm ghost" data-reopen="${t.id}">다시 열기</button><button class="sm ghost" data-deltable="${t.id}">삭제</button>`);
+    return `<div class="table-card ${open ? '' : 'closed'} ${!usable && open ? 'disabled' : ''} ${mode === 'reg' && ui.regSeat && ui.regSeat.tableId === t.id ? 'target' : ''}" data-tcard="${t.id}">
+      <div class="table-head"><span class="name">T${t.number}</span><span class="cnt">${players.length}/${L.usableSeats(t)}</span>${open ? (usable ? '' : '<span class="chip warn">사용 안함</span>') : '<span class="chip">닫힘</span>'}<span class="sp"></span>${head}</div>
       <div class="seats">${seats}</div></div>`;
+  }
+  function bindSeatToggles(root) {
+    $$('input[data-toggle]', root).forEach(cb => cb.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const [tid, seat] = cb.dataset.toggle.split(':');
+      const r = Store.commit('좌석 사용 변경', st => L.toggleSeat(st, tid, +seat));
+      if (r && r.error) toast(r.error);
+    }));
+    $$('input[data-ttoggle]', root).forEach(cb => cb.addEventListener('change', () => {
+      Store.commit('테이블 사용 변경', st => L.toggleTable(st, cb.dataset.ttoggle));
+    }));
+  }
+  function askOpenTable(eventId) {
+    const s = S(); const ev = L.eventOf(s, eventId);
+    const next = L.nextTableNumber(s, ev);
+    const ans = prompt(`열 테이블 번호 (범위 ${ev.tableStart || 1}~${ev.tableEnd || '제한 없음'}, 비우면 자동 ${next ? 'T' + next : '없음'})`, next ? '' : '');
+    if (ans === null) return;
+    let r; Store.commit('새 테이블 오픈', st => { r = L.openTable(st, eventId, { number: +ans || 0 }); if (r.error) return false; });
+    if (r.error) toast(r.error); else toast(`T${r.number} 오픈 (되돌리기 가능)`);
   }
 
   /* ---------- 등록 탭: 등록 폼 + 등록자 관리 ---------- */
@@ -116,12 +140,8 @@ const App = (() => {
     const list = all.filter(p => !q || p.name.toLowerCase().includes(q) || String(p.entryNo) === q || (p.phone || '').includes(q)).sort((a, b) => b.registeredAt - a.registeredAt);
     const gross = all.reduce((n, p) => n + (p.buyIn || 0), 0);
     const dupe = f.name.trim() && all.some(p => p.name.trim().toLowerCase() === f.name.trim().toLowerCase());
-    const seatTxt = ui.regSeat ? `${tableName(s, ui.regSeat.tableId)} · S${ui.regSeat.seat}` : (s.settings.autoOpenTable ? '새 테이블 자동 오픈' : '빈 좌석 없음');
-    const manualSel = ui.regManual && tables.length ? `
-      <div class="row" style="margin-top:8px">
-        <label class="field" style="margin:0"><span>테이블</span><select id="manTable">${tables.map(t => `<option value="${t.id}" ${ui.regSeat && ui.regSeat.tableId === t.id ? 'selected' : ''}>T${t.number} (${L.tablePlayers(s, t.id).length}/${L.usableSeats(t)}, 빈 ${L.emptySeats(s, t).length})</option>`).join('')}</select></label>
-        <label class="field" style="margin:0"><span>좌석</span><select id="manSeat">${(() => { const t = L.tableOf(s, ui.regSeat ? ui.regSeat.tableId : tables[0].id) || tables[0]; return L.emptySeats(s, t).map(n => `<option value="${n}" ${ui.regSeat && ui.regSeat.seat === n ? 'selected' : ''}>S${n}</option>`).join(''); })()}</select></label>
-      </div>` : '';
+    const nextNo = L.nextTableNumber(s, ev);
+    const seatTxt = ui.regSeat ? `${tableName(s, ui.regSeat.tableId)} · S${ui.regSeat.seat}` : (s.settings.autoOpenTable ? (nextNo ? `새 테이블 T${nextNo} 자동 오픈` : '테이블 번호 범위 소진') : '빈 좌석 없음');
     return `
     <div class="card">
       <h2>등록 · ${h(ev.name)} <span class="muted small">바이인 ${money(ev.buyIn)}원${ev.status === 'closed' ? ' · 종료된 이벤트' : ''}</span></h2>
@@ -139,14 +159,18 @@ const App = (() => {
             <div><div class="small muted">배정 좌석 (무작위)</div><div class="big">${seatTxt}</div></div>
             <span style="flex:1"></span>
             <button type="button" class="sm" id="btnReroll" ${tables.length ? '' : 'disabled'}>🎲 다시 뽑기</button>
-            <button type="button" class="sm ${ui.regManual ? 'warn' : 'ghost'}" id="btnManual" ${tables.length ? '' : 'disabled'}>${ui.regManual ? '직접 선택 중' : '직접 선택'}</button>
-          </div>${manualSel}
+            <button type="button" class="sm ${ui.regManual ? 'warn' : 'ghost'}" id="btnManual" ${tables.length ? '' : 'disabled'}>${ui.regManual ? '선택 중… (아래 좌석 탭)' : '직접 선택'}</button>
+          </div>
         </div>
         <div class="row">
           <button type="submit" class="primary" data-print="1">등록 + 확인증 인쇄</button>
           <button type="submit" class="ghost" data-print="0">등록만</button>
         </div>
       </form>
+    </div>
+    <div class="card flat" style="padding:0">
+      <div class="row tight" style="margin-bottom:8px"><h3 style="margin:0">테이블 · 좌석 사용 설정</h3><span class="muted small">범위 T${ev.tableStart || 1}~${ev.tableEnd || '∞'} · 체크 해제 = 배정 제외</span><span style="flex:1"></span><button class="sm ghost" id="btnOpenTableReg">＋ 테이블 열기</button></div>
+      <div class="tables-grid" id="regTables">${tables.map(t => seatMapHtml(s, t, 'reg')).join('') || '<div class="muted">오픈된 테이블이 없습니다. 첫 등록 시 자동으로 열립니다.</div>'}</div>
     </div>
     <div class="card">
       <div class="row tight" style="margin-bottom:8px"><h3 style="margin:0">등록자 <span class="muted small">${all.length}명 · 총 바이인 ${money(gross)}원</span></h3><span style="flex:1"></span></div>
@@ -178,11 +202,12 @@ const App = (() => {
     });
     $('#btnReroll', root).addEventListener('click', () => { ui.regSeat = L.pickSeat(S(), curEvent().id); ui.regManual = false; render(); });
     $('#btnManual', root).addEventListener('click', () => { ui.regManual = !ui.regManual; render(); });
-    const mt = $('#manTable', root), ms = $('#manSeat', root);
-    if (mt) {
-      mt.addEventListener('change', () => { const t = L.tableOf(S(), mt.value); const e = L.emptySeats(S(), t); ui.regSeat = e.length ? { tableId: t.id, seat: e[0] } : null; render(); });
-      ms.addEventListener('change', () => { ui.regSeat = { tableId: mt.value, seat: +ms.value }; render(); });
-    }
+    $('#btnOpenTableReg', root).addEventListener('click', () => askOpenTable(curEvent().id));
+    $$('.seat.pick', root).forEach(el => el.addEventListener('click', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      ui.regSeat = { tableId: el.dataset.table, seat: +el.dataset.seat }; ui.regManual = false; render();
+    }));
+    bindSeatToggles(root);
     const search = $('#regSearch', root);
     search.addEventListener('input', () => { ui.regSearch = search.value; const pos = search.selectionStart; render(); const s2 = $('#regSearch'); s2.focus(); s2.setSelectionRange(pos, pos); });
     $$('[data-pmenu]', root).forEach(b => b.addEventListener('click', () => regPlayerSheet(b.dataset.pmenu)));
@@ -240,26 +265,20 @@ const App = (() => {
       <button class="primary sm" id="btnOpenTable">＋ 새 테이블</button>
       <button class="sm" id="btnAutoBalance2" ${info.need ? '' : 'disabled'}>⚖ 자동 밸런싱</button>
       <label class="small muted" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="chkClosed" ${ui.showClosed ? 'checked' : ''} style="width:auto">닫힌 테이블 표시</label>
-      <span class="small muted">체크박스 = 좌석 사용 여부 · 플레이어 탭 = 이동/탈락</span>
+      <span class="small muted">플레이어 탭 = 이동/탈락 · 좌석 사용 설정은 등록 탭</span>
     </div>
-    <div class="tables-grid" id="tables">${tables.map(t => seatMapHtml(s, t)).join('') || '<div class="muted card">테이블이 없습니다. 새 테이블을 열어주세요.</div>'}</div>`;
+    <div class="tables-grid" id="tables">${tables.map(t => seatMapHtml(s, t, 'tables')).join('') || '<div class="muted card">테이블이 없습니다. 새 테이블을 열어주세요.</div>'}</div>`;
   }
   function bindTables(root) {
     if (!curEvent()) { bindNoEvent(root); return; }
     const ev = curEvent();
-    $('#btnOpenTable', root).addEventListener('click', () => { Store.commit('새 테이블 오픈', st => { L.openTable(st, ev.id); }); toast('새 테이블을 열었습니다 (되돌리기 가능)'); });
+    $('#btnOpenTable', root).addEventListener('click', () => askOpenTable(ev.id));
     $('#chkClosed', root).addEventListener('change', (e) => { ui.showClosed = e.target.checked; render(); });
     const cancelMove = $('#btnCancelMove', root); if (cancelMove) cancelMove.addEventListener('click', () => { ui.moveMode = null; render(); });
     ['#btnAutoBalance', '#btnAutoBalance2'].forEach(id => { const b = $(id, root); if (b) b.addEventListener('click', doAutoBalance); });
     $$('[data-close]', root).forEach(b => b.addEventListener('click', () => doCloseTable(b.dataset.close)));
-    $$('[data-reopen]', root).forEach(b => b.addEventListener('click', () => { Store.commit('테이블 다시 열기', st => L.reopenTable(st, b.dataset.reopen)); toast('테이블을 다시 열었습니다'); }));
-    $$('[data-deltable]', root).forEach(b => b.addEventListener('click', () => { const r = Store.commit('테이블 삭제', st => L.deleteTable(st, b.dataset.deltable)); if (r && r.error) toast(r.error); }));
-    $$('input[data-toggle]', root).forEach(cb => cb.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const [tid, seat] = cb.dataset.toggle.split(':');
-      const r = Store.commit('좌석 사용 변경', st => L.toggleSeat(st, tid, +seat));
-      if (r && r.error) toast(r.error);
-    }));
+    $$('[data-reopen]', root).forEach(b => b.addEventListener('click', () => { let r; Store.commit('테이블 다시 열기', st => { r = L.reopenTable(st, b.dataset.reopen); if (r && r.error) return false; }); toast(r && r.error ? r.error : '테이블을 다시 열었습니다'); }));
+    $$('[data-deltable]', root).forEach(b => b.addEventListener('click', () => { let r; Store.commit('테이블 삭제', st => { r = L.deleteTable(st, b.dataset.deltable); if (r && r.error) return false; }); if (r && r.error) toast(r.error); }));
     $$('.seat', root).forEach(el => el.addEventListener('click', (e) => {
       if (e.target.tagName === 'INPUT') return;
       const tid = el.dataset.table, seat = +el.dataset.seat, pid = el.dataset.player;
@@ -318,7 +337,7 @@ const App = (() => {
       const all = L.eventPlayers(s, e.id), act = all.filter(p => p.status === 'active');
       return `<div class="list-item" style="${e.id === s.selectedEventId ? 'outline:2px solid var(--accent)' : ''}">
         <div class="grow" data-selevent="${e.id}" style="cursor:pointer"><div class="t">${h(e.name)} ${e.status === 'closed' ? '<span class="chip">종료</span>' : ''}</div>
-        <div class="s">바이인 ${money(e.buyIn)}원 · ${e.seats}인 테이블 · 참가 ${all.length} / 남은 ${act.length} / 테이블 ${L.openTables(s, e.id).length}</div></div>
+        <div class="s">바이인 ${money(e.buyIn)}원 · ${e.seats}인 · 테이블 T${e.tableStart || 1}~${e.tableEnd || '∞'} · 참가 ${all.length} / 남은 ${act.length} / 오픈 ${L.openTables(s, e.id).length}</div></div>
         <button class="sm ghost" data-editevent="${e.id}">수정</button></div>`;
     }).join('');
     const ed = ui.eventEdit ? (ui.eventEdit === 'new' ? { name: '', buyIn: '', seats: s.settings.defaultSeats, startChips: '', memo: '', status: 'open', rakePct: 0, prizePool: '', payouts: [] } : L.eventOf(s, ui.eventEdit)) : null;
@@ -331,10 +350,17 @@ const App = (() => {
           <label class="field"><span>스타팅 칩</span><input name="startChips" type="number" value="${h(ed.startChips || '')}"></label>
         </div>
         <div class="row">
-          <label class="field"><span>수수료 (%)</span><input name="rakePct" type="number" min="0" max="100" step="0.5" value="${h(ed.rakePct || 0)}"></label>
-          <label class="field"><span>상금 풀 고정 (원, 비우면 바이인 합계 자동)</span><input name="prizePool" type="number" value="${h(ed.prizePool || '')}"></label>
+          <label class="field"><span>테이블 시작 번호</span><input name="tableStart" type="number" min="1" value="${h(ed.tableStart || 1)}"></label>
+          <label class="field"><span>테이블 끝 번호 (비우면 제한 없음)</span><input name="tableEnd" type="number" min="1" value="${h(ed.tableEnd || '')}"></label>
         </div>
-        <label class="field"><span>상금 배분 % (1위부터, 쉼표 구분 · 비우면 인원수 기준 자동)</span><input name="payouts" value="${h((ed.payouts || []).join(', '))}" placeholder="예: 50, 30, 20"></label>
+        <div class="row">
+          <label class="field"><span>수수료 (%)</span><input name="rakePct" type="number" min="0" max="100" step="0.5" value="${h(ed.rakePct || 0)}"></label>
+          <label class="field"><span>상금 풀 고정 (원, 비우면 바이인 합계−수수료)</span><input name="prizePool" type="number" value="${h(ed.prizePool || '')}"></label>
+        </div>
+        <div class="field"><span class="small muted">상금표 (순위 구간 → 금액 · 예: 1~1위 1,000,000 / 10~20위 50,000 / 100~900위 30,000)</span>
+          <div id="payoutRows">${payoutRowsHtml(ed.payouts || [])}</div>
+          <button type="button" class="sm ghost" id="btnAddPayout" style="margin-top:6px">＋ 구간 추가</button>
+        </div>
         <label class="field"><span>메모</span><input name="memo" value="${h(ed.memo || '')}"></label>
         ${ui.eventEdit !== 'new' ? `<label class="field"><span>상태</span><select name="status"><option value="open" ${ed.status === 'open' ? 'selected' : ''}>진행 중</option><option value="closed" ${ed.status === 'closed' ? 'selected' : ''}>종료</option></select></label>` : ''}
         <div class="row"><button type="submit" class="primary">저장</button><button type="button" class="ghost" id="btnCancelEvent">취소</button>${ui.eventEdit !== 'new' ? `<button type="button" class="danger" id="btnDeleteEvent">삭제</button>` : ''}</div>
@@ -353,24 +379,26 @@ const App = (() => {
         body = `<div class="kpis">
           ${kpi('참가', all.length + '명')}${kpi('남은', active.length + '명')}${kpi('탈락', busted.length + '명')}
           ${kpi('오픈 테이블', L.openTables(s, ev.id).length + '개')}${kpi('총 바이인', money(gross) + '원')}${kpi('상금 풀', money(pool) + '원')}
-          ${kpi('입상 자리', pay.length + '곳')}${kpi('바우처 지급', money(paid) + '원')}
+          ${kpi('입상 자리', pay.reduce((n, r) => n + r.to - r.from + 1, 0) + '명')}${kpi('상금표 총액', money(L.payoutTotal(s, ev)) + '원')}${kpi('바우처 지급', money(paid) + '원')}
           ${kpi('밸런스', info.tables.length ? (info.need ? '필요' : '양호') : '-')}
         </div>
         <div class="row" style="margin-top:12px"><a class="btn-link" href="#reg">등록 탭 →</a><a class="btn-link" href="#tables">테이블 탭 →</a>
         ${active.length === 1 && ev.status !== 'closed' ? `<button class="primary" id="btnFinish">🏆 ${h(active[0].name)} 우승 · 이벤트 종료</button>` : ''}</div>
         ${ev.memo ? `<p class="muted small" style="margin-top:10px">${h(ev.memo)}</p>` : ''}`;
       } else if (ui.eventSection === 'payouts') {
-        body = `<p class="muted small">상금 풀 ${money(pool)}원 (${ev.prizePool ? '고정' : `바이인 합계 ${money(gross)}원 − 수수료 ${ev.rakePct || 0}%`}) · 비율은 이벤트 수정에서 변경 · 금액은 천원 단위 절사</p>
-        <table class="tbl"><tr><th>순위</th><th>비율</th><th>상금</th><th>선수</th></tr>
-        ${pay.map(r => { const p = busted.find(b => b.finishRank === r.rank) || (r.rank === 1 && active.length === 1 ? active[0] : null); return `<tr><td>${r.rank}위</td><td>${r.pct}%</td><td>${money(r.amount)}원</td><td>${p ? h(p.name) : '<span class="muted">-</span>'}</td></tr>`; }).join('')}
-        <tr><td colspan="2"><b>합계</b></td><td><b>${money(pay.reduce((n, r) => n + r.amount, 0))}원</b></td><td class="muted small">${pay.reduce((n, r) => n + r.pct, 0)}%</td></tr></table>`;
+        const total = L.payoutTotal(s, ev);
+        const nameAt = (rank) => { const p = busted.find(b => b.finishRank === rank) || (rank === 1 && active.length === 1 ? active[0] : null); return p ? h(p.name) : ''; };
+        body = `<p class="muted small">상금 풀 ${money(pool)}원 (${ev.prizePool ? '고정' : `바이인 합계 ${money(gross)}원 − 수수료 ${ev.rakePct || 0}%`}) · 상금표 총액 ${money(total)}원 ${total > pool && pool ? '<span style="color:var(--danger)">(풀 초과)</span>' : ''} · 구간은 이벤트 수정에서 변경</p>
+        ${pay.length ? `<table class="tbl"><tr><th>순위</th><th>금액</th><th>인원</th><th>확정 선수</th></tr>
+        ${pay.map(r => { const n = r.to - r.from + 1; const names = []; for (let k = r.from; k <= r.to && names.length < 6; k++) { const nm = nameAt(k); if (nm) names.push(k + '위 ' + nm); } return `<tr><td>${r.from === r.to ? r.from + '위' : r.from + '~' + r.to + '위'}</td><td>${r.amount ? money(r.amount) + '원' : ''}${r.label ? ` <span class="muted small">${h(r.label)}</span>` : ''}</td><td class="muted">${n}명 · ${money(r.amount * n)}원</td><td class="small">${names.join(', ') || '<span class="muted">-</span>'}</td></tr>`; }).join('')}
+        <tr><td><b>합계</b></td><td><b>${money(total)}원</b></td><td class="muted">${pay.reduce((n, r) => n + r.to - r.from + 1, 0)}명</td><td></td></tr></table>` : '<div class="muted">상금표가 없습니다. 이벤트 수정에서 구간을 추가하세요.</div>'}`;
       } else {
         const rows = [];
         if (active.length === 1) rows.push({ rank: 1, p: active[0], live: true });
         busted.forEach(b => rows.push({ rank: b.finishRank, p: b }));
         body = `<div class="list">${rows.map(({ rank, p, live }) => {
-          const prize = L.payoutFor(s, ev, rank); const v = (s.vouchers || []).find(x => x.playerId === p.id);
-          return `<div class="list-item"><span class="rank">${rank}위</span><div class="grow"><div class="t">${h(p.name)} <span class="muted small">#${p.entryNo}${live ? ' · 진행 중' : ''}</span></div><div class="s">${prize ? money(prize) + '원' : '입상 없음'}${v ? ` · 바우처 ${v.serial} 발행됨` : ''}${p.bustedAt ? ' · ' + Print.fmtTime(p.bustedAt) : ''}</div></div>
+          const row = L.payoutRow(s, ev, rank); const prize = row ? row.amount : 0; const v = (s.vouchers || []).find(x => x.playerId === p.id);
+          return `<div class="list-item"><span class="rank">${rank}위</span><div class="grow"><div class="t">${h(p.name)} <span class="muted small">#${p.entryNo}${live ? ' · 진행 중' : ''}</span></div><div class="s">${prize ? money(prize) + '원' : (row && row.label ? '' : '입상 없음')}${row && row.label ? ' ' + h(row.label) : ''}${v ? ` · 바우처 ${v.serial} 발행됨` : ''}${p.bustedAt ? ' · ' + Print.fmtTime(p.bustedAt) : ''}</div></div>
             ${prize && !v ? `<button class="sm primary" data-issue="${p.id}" data-amt="${prize}">바우처</button>` : ''}${v ? `<button class="sm ghost" data-revoucher="${v.id}">⎙</button>` : ''}${!live ? `<button class="sm ghost" data-unbust="${p.id}">복구</button>` : ''}</div>`;
         }).join('') || '<div class="muted small">아직 탈락자가 없습니다.</div>'}</div>
         ${active.length > 1 ? `<p class="muted small" style="margin-top:8px">남은 ${active.length}명은 테이블 탭에서 탈락 처리하면 여기에 순위가 쌓입니다.</p>` : ''}`;
@@ -382,6 +410,18 @@ const App = (() => {
       <div class="list" style="margin-top:10px">${list || '<div class="muted">이벤트가 없습니다. 새 이벤트를 만들어 시작하세요.</div>'}</div></div>`;
   }
   const kpi = (label, val) => `<div class="kpi"><div class="k">${label}</div><div class="v">${val}</div></div>`;
+  function payoutRowsHtml(rows) {
+    if (!rows.length) return '<div class="muted small" style="padding:6px 0">구간 없음</div>';
+    return rows.map((r, i) => `<div class="row tight payout-row" style="margin-bottom:6px">
+      <input type="number" min="1" name="pfrom" value="${h(r.from)}" placeholder="부터" style="width:70px"><span class="muted">~</span>
+      <input type="number" min="1" name="pto" value="${h(r.to)}" placeholder="까지" style="width:70px"><span class="muted">위</span>
+      <input type="number" min="0" name="pamount" value="${h(r.amount || '')}" placeholder="금액(원)" style="width:120px">
+      <input name="plabel" value="${h(r.label || '')}" placeholder="비고(티켓 등)" style="flex:1;min-width:80px">
+      <button type="button" class="sm ghost" data-delrow="${i}">✕</button></div>`).join('');
+  }
+  function readPayoutRows(form) {
+    return $$('.payout-row', form).map(r => ({ from: r.querySelector('[name=pfrom]').value, to: r.querySelector('[name=pto]').value, amount: r.querySelector('[name=pamount]').value, label: r.querySelector('[name=plabel]').value }));
+  }
   function bindEvents(root) {
     $('#btnNewEvent', root).addEventListener('click', () => { ui.eventEdit = 'new'; render(); setTimeout(() => { const i = $('#eventForm input[name=name]'); if (i) i.focus(); }, 0); });
     $$('[data-selevent]', root).forEach(el => el.addEventListener('click', () => { Store.patch(st => st.selectedEventId = el.dataset.selevent); ui.regSeat = null; ui.moveMode = null; }));
@@ -399,13 +439,19 @@ const App = (() => {
     const form = $('#eventForm', root); if (!form) return;
     form.addEventListener('submit', (e) => {
       e.preventDefault(); const fd = new FormData(form); const data = Object.fromEntries(fd.entries());
-      data.payouts = String(data.payouts || '').split(/[,\s]+/).map(Number).filter(n => n > 0);
+      ['pfrom', 'pto', 'pamount', 'plabel'].forEach(k => delete data[k]);
+      data.payouts = L.normalizePayouts(readPayoutRows(form));
       data.rakePct = +data.rakePct || 0; data.prizePool = +data.prizePool || 0;
-      if (data.payouts.length) { const sum = data.payouts.reduce((a, b) => a + b, 0); if (Math.abs(sum - 100) > 0.01 && !confirm(`상금 배분 합계가 ${sum}% 입니다 (100% 아님). 그대로 저장할까요?`)) return; }
-      if (ui.eventEdit === 'new') { let ev; Store.commit('이벤트 생성: ' + data.name, st => { ev = L.createEvent(st, data); Object.assign(ev, { payouts: data.payouts, rakePct: data.rakePct, prizePool: data.prizePool }); st.selectedEventId = ev.id; }); toast('이벤트 생성됨'); }
+      if (data.tableEnd && +data.tableEnd < +data.tableStart) { toast('테이블 끝 번호가 시작 번호보다 작습니다'); return; }
+      if (ui.eventEdit === 'new') { let ev; Store.commit('이벤트 생성: ' + data.name, st => { ev = L.createEvent(st, data); st.selectedEventId = ev.id; }); toast('이벤트 생성됨'); }
       else { Store.commit('이벤트 수정', st => L.updateEvent(st, ui.eventEdit, data)); toast('저장됨'); }
       ui.eventEdit = null; render();
     });
+    // 상금표 행 추가/삭제: 폼 값을 유지한 채 행만 갱신
+    const rerows = (rows) => { $('#payoutRows', form).innerHTML = payoutRowsHtml(rows); bindRows(); };
+    const bindRows = () => $$('[data-delrow]', form).forEach(b => b.addEventListener('click', () => { const rows = readPayoutRows(form); rows.splice(+b.dataset.delrow, 1); rerows(rows); }));
+    bindRows();
+    $('#btnAddPayout', form).addEventListener('click', () => { const rows = readPayoutRows(form); const last = rows[rows.length - 1]; const next = last ? (+last.to || +last.from || 0) + 1 : 1; rows.push({ from: next, to: next, amount: '', label: '' }); rerows(rows); });
     $('#btnCancelEvent', root).addEventListener('click', () => { ui.eventEdit = null; render(); });
     const del = $('#btnDeleteEvent', root); if (del) del.addEventListener('click', () => {
       const ev = L.eventOf(S(), ui.eventEdit); const n = L.eventPlayers(S(), ev.id).length;

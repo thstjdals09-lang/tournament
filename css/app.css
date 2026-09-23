@@ -132,3 +132,5 @@ main#view{padding:12px;padding-bottom:calc(var(--tabH) + 20px + env(safe-area-in
 .tbl th{color:var(--muted);font-weight:600;font-size:12px}
 .btn-link{display:inline-block;background:var(--panel2);border-radius:10px;padding:10px 14px;color:var(--text);text-decoration:none;text-align:center}
 @media (min-width:600px){.kpis{grid-template-columns:repeat(5,1fr)}}
+.table-card.disabled{border-style:dashed;opacity:.7}
+.payout-row input{padding:6px 8px}

@@ -30,7 +30,8 @@ const Logic = (() => {
     const ev = {
       id: Store.uid(), name: data.name || '새 이벤트', buyIn: +data.buyIn || 0,
       seats: +data.seats || s.settings.defaultSeats || 9, startChips: +data.startChips || 0,
-      status: 'open', createdAt: Date.now(), nextEntryNo: 1, nextTableNo: 1, memo: data.memo || ''
+      status: 'open', createdAt: Date.now(), nextEntryNo: 1, memo: data.memo || '',
+      tableStart: +data.tableStart || 1, tableEnd: +data.tableEnd || 0, rakePct: +data.rakePct || 0, prizePool: +data.prizePool || 0, payouts: Array.isArray(data.payouts) ? data.payouts : []
     };
     s.events.push(ev);
     if (!s.selectedEventId) s.selectedEventId = ev.id;
@@ -42,6 +43,10 @@ const Logic = (() => {
     if (data.seats !== undefined) ev.seats = +data.seats;
     if (data.buyIn !== undefined) ev.buyIn = +data.buyIn;
     if (data.startChips !== undefined) ev.startChips = +data.startChips;
+    if (data.tableStart !== undefined) ev.tableStart = +data.tableStart || 1;
+    if (data.tableEnd !== undefined) ev.tableEnd = +data.tableEnd || 0;
+    if (data.rakePct !== undefined) ev.rakePct = +data.rakePct || 0;
+    if (data.prizePool !== undefined) ev.prizePool = +data.prizePool || 0;
   }
   function deleteEvent(s, id) {
     s.events = s.events.filter(e => e.id !== id);
@@ -51,12 +56,27 @@ const Logic = (() => {
   }
 
   /* ---------- 테이블 ---------- */
+  /** 현장 전체에서 오픈 상태인 테이블 번호(이벤트 무관, 물리 테이블 충돌 방지) */
+  const usedTableNumbers = (s) => new Set(s.tables.filter(t => t.status === 'open').map(t => t.number));
+  /** 이벤트 범위(tableStart~tableEnd) 안에서 비어있는 가장 작은 번호 */
+  function nextTableNumber(s, ev) {
+    const used = usedTableNumbers(s);
+    const start = ev.tableStart || 1, end = ev.tableEnd || 999;
+    for (let n = start; n <= end; n++) if (!used.has(n)) return n;
+    return null;
+  }
   function openTable(s, eventId, opts) {
     opts = opts || {};
-    const ev = eventOf(s, eventId); if (!ev) return null;
-    const t = { id: Store.uid(), eventId, number: ev.nextTableNo++, seats: +opts.seats || ev.seats, disabledSeats: [], status: 'open', openedAt: Date.now() };
+    const ev = eventOf(s, eventId); if (!ev) return { error: '이벤트 없음' };
+    let number = +opts.number || 0;
+    if (number) { if (usedTableNumbers(s).has(number)) return { error: 'T' + number + '은(는) 이미 사용 중입니다' }; }
+    else { number = nextTableNumber(s, ev); if (!number) return { error: '테이블 번호 범위(' + (ev.tableStart || 1) + '~' + (ev.tableEnd || '∞') + ')에 빈 번호가 없습니다' }; }
+    const t = { id: Store.uid(), eventId, number, seats: +opts.seats || ev.seats, disabledSeats: [], enabled: true, status: 'open', openedAt: Date.now() };
     s.tables.push(t); return t;
   }
+  /** 테이블 사용/미사용: 미사용이면 새 배정 대상에서 제외(앉아있는 사람은 유지) */
+  function toggleTable(s, tableId) { const t = tableOf(s, tableId); if (!t) return false; t.enabled = t.enabled === false; }
+  const tableUsable = (t) => t.status === 'open' && t.enabled !== false;
   function toggleSeat(s, tableId, seat) {
     const t = tableOf(s, tableId); if (!t) return false;
     if (seatPlayer(s, tableId, seat)) return { error: '플레이어가 앉아있는 좌석은 비활성화할 수 없습니다' };
@@ -68,7 +88,7 @@ const Logic = (() => {
   function closeTable(s, tableId) {
     const t = tableOf(s, tableId); if (!t || t.status !== 'open') return { error: '이미 닫힌 테이블' };
     const movers = shuffle(tablePlayers(s, tableId));
-    const others = openTables(s, t.eventId).filter(x => x.id !== tableId);
+    const others = openTables(s, t.eventId).filter(x => x.id !== tableId && tableUsable(x));
     const capacity = others.reduce((n, x) => n + emptySeats(s, x).length, 0);
     if (movers.length > capacity) return { error: '빈 좌석 부족 (이동 ' + movers.length + '명 / 빈좌석 ' + capacity + ')' };
     const moves = [];
@@ -81,7 +101,7 @@ const Logic = (() => {
     t.status = 'closed'; t.closedAt = Date.now();
     return { moves };
   }
-  function reopenTable(s, tableId) { const t = tableOf(s, tableId); if (!t) return false; t.status = 'open'; delete t.closedAt; }
+  function reopenTable(s, tableId) { const t = tableOf(s, tableId); if (!t) return false; if (usedTableNumbers(s).has(t.number)) return { error: 'T' + t.number + ' 번호가 이미 사용 중입니다' }; t.status = 'open'; delete t.closedAt; }
   function deleteTable(s, tableId) {
     if (tablePlayers(s, tableId).length) return { error: '플레이어가 있는 테이블은 삭제할 수 없습니다' };
     s.tables = s.tables.filter(t => t.id !== tableId);
@@ -92,7 +112,7 @@ const Logic = (() => {
   function pickSeat(s, eventId, opts) {
     opts = opts || {};
     let cands = openTables(s, eventId)
-      .filter(t => t.id !== opts.excludeTableId)
+      .filter(t => t.id !== opts.excludeTableId && tableUsable(t))
       .map(t => ({ t, empty: emptySeats(s, t), n: tablePlayers(s, t.id).length }))
       .filter(c => c.empty.length);
     if (!cands.length) return null;
@@ -114,6 +134,7 @@ const Logic = (() => {
     if (!target) {
       if (!s.settings.autoOpenTable) return { error: '빈 좌석이 없습니다. 새 테이블을 열어주세요' };
       openedTable = openTable(s, eventId);
+      if (openedTable.error) return { error: openedTable.error };
       target = pickSeat(s, eventId);
     }
     const p = {
@@ -156,7 +177,7 @@ const Logic = (() => {
     if (!target) target = pickSeat(s, p.eventId);
     if (!target) {
       if (!s.settings.autoOpenTable) return { error: '빈 좌석 없음' };
-      openTable(s, p.eventId); target = pickSeat(s, p.eventId);
+      const ot = openTable(s, p.eventId); if (ot.error) return { error: ot.error }; target = pickSeat(s, p.eventId);
     }
     p.status = 'active'; p.tableId = target.tableId; p.seat = target.seat; p.finishRank = null; p.bustedAt = null;
     return target;
@@ -184,7 +205,7 @@ const Logic = (() => {
       if (!info.need) break;
       const sorted = info.tables.slice().sort((a, b) => b.n - a.n);
       const big = sorted[0];
-      const small = sorted.filter(c => emptySeats(s, c.table).length).sort((a, b) => a.n - b.n)[0];
+      const small = sorted.filter(c => tableUsable(c.table) && emptySeats(s, c.table).length).sort((a, b) => a.n - b.n)[0];
       if (!small || small.n >= big.n - 1) break;
       const p = pick(tablePlayers(s, big.table.id));
       const seat = pick(emptySeats(s, small.table));
@@ -194,26 +215,21 @@ const Logic = (() => {
     return moves;
   }
 
-  /* ---------- 상금 구조 ---------- */
-  /** 참가 인원에 따른 기본 페이아웃 비율(%) */
-  function defaultPayouts(n) {
-    if (n <= 10) return [50, 30, 20];
-    if (n <= 20) return [40, 25, 17, 11, 7];
-    if (n <= 40) return [35, 22, 14, 10, 7, 5, 4, 3];
-    return [30, 18, 12, 9, 7, 5.5, 4.5, 3.5, 3, 2.5, 2, 1.5, 1.5];
-  }
+  /* ---------- 상금 구조: 순위 구간 → 금액 행 [{from,to,amount,label}] ---------- */
   function prizePool(s, ev) {
     if (ev.prizePool) return +ev.prizePool;
     const gross = eventPlayers(s, ev.id).reduce((n, p) => n + (p.buyIn || 0), 0);
     return Math.round(gross * (1 - (+ev.rakePct || 0) / 100));
   }
-  /** [{rank, pct, amount}] */
-  function payoutTable(s, ev) {
-    const pcts = (ev.payouts && ev.payouts.length) ? ev.payouts : defaultPayouts(eventPlayers(s, ev.id).length);
-    const pool = prizePool(s, ev);
-    return pcts.map((pct, i) => ({ rank: i + 1, pct: +pct, amount: Math.floor(pool * (+pct) / 100 / 1000) * 1000 }));
+  function normalizePayouts(rows) {
+    return (rows || []).map(r => ({ from: Math.max(1, +r.from || 1), to: Math.max(+r.from || 1, +r.to || +r.from || 1), amount: +r.amount || 0, label: (r.label || '').trim() }))
+      .filter(r => r.amount > 0 || r.label).sort((a, b) => a.from - b.from);
   }
-  function payoutFor(s, ev, rank) { const row = payoutTable(s, ev).find(r => r.rank === rank); return row ? row.amount : 0; }
+  const payoutTable = (s, ev) => normalizePayouts(ev.payouts);
+  function payoutRow(s, ev, rank) { return payoutTable(s, ev).find(r => rank >= r.from && rank <= r.to) || null; }
+  function payoutFor(s, ev, rank) { const r = payoutRow(s, ev, rank); return r ? r.amount : 0; }
+  /** 상금표 총액 (구간 인원 × 금액) */
+  const payoutTotal = (s, ev) => payoutTable(s, ev).reduce((n, r) => n + r.amount * (r.to - r.from + 1), 0);
 
   /* ---------- 바우처 ---------- */
   function issueVoucher(s, data) {
@@ -224,5 +240,5 @@ const Logic = (() => {
   }
 
   return { rand, pick, shuffle, eventOf, tableOf, playerOf, openTables, allTables, eventPlayers, activePlayers, bustedPlayers, tablePlayers, seatPlayer, emptySeats, usableSeats,
-    createEvent, updateEvent, deleteEvent, openTable, toggleSeat, closeTable, reopenTable, deleteTable, pickSeat, register, cancelRegistration, movePlayer, bustOut, unbust, balanceInfo, autoBalance, issueVoucher, defaultPayouts, prizePool, payoutTable, payoutFor };
+    createEvent, updateEvent, deleteEvent, openTable, toggleSeat, closeTable, reopenTable, deleteTable, pickSeat, register, cancelRegistration, movePlayer, bustOut, unbust, balanceInfo, autoBalance, issueVoucher, prizePool, normalizePayouts, payoutTable, payoutRow, payoutFor, payoutTotal, toggleTable, tableUsable, nextTableNumber, usedTableNumbers };
 })();
