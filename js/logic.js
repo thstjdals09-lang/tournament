@@ -194,6 +194,27 @@ const Logic = (() => {
     return moves;
   }
 
+  /* ---------- 상금 구조 ---------- */
+  /** 참가 인원에 따른 기본 페이아웃 비율(%) */
+  function defaultPayouts(n) {
+    if (n <= 10) return [50, 30, 20];
+    if (n <= 20) return [40, 25, 17, 11, 7];
+    if (n <= 40) return [35, 22, 14, 10, 7, 5, 4, 3];
+    return [30, 18, 12, 9, 7, 5.5, 4.5, 3.5, 3, 2.5, 2, 1.5, 1.5];
+  }
+  function prizePool(s, ev) {
+    if (ev.prizePool) return +ev.prizePool;
+    const gross = eventPlayers(s, ev.id).reduce((n, p) => n + (p.buyIn || 0), 0);
+    return Math.round(gross * (1 - (+ev.rakePct || 0) / 100));
+  }
+  /** [{rank, pct, amount}] */
+  function payoutTable(s, ev) {
+    const pcts = (ev.payouts && ev.payouts.length) ? ev.payouts : defaultPayouts(eventPlayers(s, ev.id).length);
+    const pool = prizePool(s, ev);
+    return pcts.map((pct, i) => ({ rank: i + 1, pct: +pct, amount: Math.floor(pool * (+pct) / 100 / 1000) * 1000 }));
+  }
+  function payoutFor(s, ev, rank) { const row = payoutTable(s, ev).find(r => r.rank === rank); return row ? row.amount : 0; }
+
   /* ---------- 바우처 ---------- */
   function issueVoucher(s, data) {
     s.vouchers = s.vouchers || [];
@@ -203,5 +224,5 @@ const Logic = (() => {
   }
 
   return { rand, pick, shuffle, eventOf, tableOf, playerOf, openTables, allTables, eventPlayers, activePlayers, bustedPlayers, tablePlayers, seatPlayer, emptySeats, usableSeats,
-    createEvent, updateEvent, deleteEvent, openTable, toggleSeat, closeTable, reopenTable, deleteTable, pickSeat, register, cancelRegistration, movePlayer, bustOut, unbust, balanceInfo, autoBalance, issueVoucher };
+    createEvent, updateEvent, deleteEvent, openTable, toggleSeat, closeTable, reopenTable, deleteTable, pickSeat, register, cancelRegistration, movePlayer, bustOut, unbust, balanceInfo, autoBalance, issueVoucher, defaultPayouts, prizePool, payoutTable, payoutFor };
 })();

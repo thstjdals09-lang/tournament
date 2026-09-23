@@ -121,3 +121,14 @@ main#view{padding:12px;padding-bottom:calc(var(--tabH) + 20px + env(safe-area-in
   #print-root{display:block}
 }
 #print-root{display:none}
+
+/* 이벤트 현황판 */
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.kpi{background:var(--panel2);border-radius:10px;padding:10px}
+.kpi .k{font-size:11px;color:var(--muted)}
+.kpi .v{font-size:18px;font-weight:800;margin-top:2px}
+.tbl{width:100%;border-collapse:collapse;font-size:14px}
+.tbl th,.tbl td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+.tbl th{color:var(--muted);font-weight:600;font-size:12px}
+.btn-link{display:inline-block;background:var(--panel2);border-radius:10px;padding:10px 14px;color:var(--text);text-decoration:none;text-align:center}
+@media (min-width:600px){.kpis{grid-template-columns:repeat(5,1fr)}}
