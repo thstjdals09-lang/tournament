@@ -16,14 +16,21 @@ const Logic = (() => {
   const tablePlayers = (s, tableId) => s.players.filter(p => p.tableId === tableId && p.status === 'active');
   const seatPlayer = (s, tableId, seat) => s.players.find(p => p.tableId === tableId && p.seat === seat && p.status === 'active');
 
+  /** 비활성 좌석 = 이벤트 공통 좌석 번호 설정 ∪ 테이블 개별 설정 */
+  function disabledSeatSet(s, table) {
+    const ev = eventOf(s, table.eventId);
+    return new Set([].concat(table.disabledSeats || [], (ev && ev.disabledSeats) || []));
+  }
   function emptySeats(s, table) {
     const taken = new Set(tablePlayers(s, table.id).map(p => p.seat));
-    const off = new Set(table.disabledSeats || []);
+    const off = disabledSeatSet(s, table);
     const out = [];
     for (let i = 1; i <= table.seats; i++) if (!taken.has(i) && !off.has(i)) out.push(i);
     return out;
   }
-  const usableSeats = (t) => t.seats - (t.disabledSeats || []).length;
+  const usableSeats = (s, t) => { const off = disabledSeatSet(s, t); let n = 0; for (let i = 1; i <= t.seats; i++) if (!off.has(i)) n++; return n; };
+  /** 비활성 좌석에 앉아있는 플레이어(설정 변경 후 남은 사람) */
+  const playersOnDisabledSeats = (s, eventId) => activePlayers(s, eventId).filter(p => { const t = tableOf(s, p.tableId); return t && disabledSeatSet(s, t).has(p.seat); });
 
   /* ---------- 이벤트 ---------- */
   function createEvent(s, data) {
@@ -31,7 +38,7 @@ const Logic = (() => {
       id: Store.uid(), name: data.name || '새 이벤트', buyIn: +data.buyIn || 0,
       seats: +data.seats || s.settings.defaultSeats || 9, startChips: +data.startChips || 0,
       status: 'open', createdAt: Date.now(), nextEntryNo: 1, memo: data.memo || '',
-      tableStart: +data.tableStart || 1, tableEnd: +data.tableEnd || 0, rakePct: +data.rakePct || 0, prizePool: +data.prizePool || 0, payouts: Array.isArray(data.payouts) ? data.payouts : []
+      disabledSeats: [], tableStart: +data.tableStart || 1, tableEnd: +data.tableEnd || 0, rakePct: +data.rakePct || 0, prizePool: +data.prizePool || 0, payouts: Array.isArray(data.payouts) ? data.payouts : []
     };
     s.events.push(ev);
     if (!s.selectedEventId) s.selectedEventId = ev.id;
@@ -73,6 +80,13 @@ const Logic = (() => {
     else { number = nextTableNumber(s, ev); if (!number) return { error: '테이블 번호 범위(' + (ev.tableStart || 1) + '~' + (ev.tableEnd || '∞') + ')에 빈 번호가 없습니다' }; }
     const t = { id: Store.uid(), eventId, number, seats: +opts.seats || ev.seats, disabledSeats: [], enabled: true, status: 'open', openedAt: Date.now() };
     s.tables.push(t); return t;
+  }
+  /** 이벤트 공통 좌석 번호 사용/미사용 (모든 테이블에 적용) */
+  function toggleEventSeat(s, eventId, seat) {
+    const ev = eventOf(s, eventId); if (!ev) return false;
+    const set = new Set(ev.disabledSeats || []);
+    if (set.has(seat)) set.delete(seat); else set.add(seat);
+    ev.disabledSeats = Array.from(set).sort((a, b) => a - b);
   }
   /** 테이블 사용/미사용: 미사용이면 새 배정 대상에서 제외(앉아있는 사람은 유지) */
   function toggleTable(s, tableId) { const t = tableOf(s, tableId); if (!t) return false; t.enabled = t.enabled === false; }
@@ -186,7 +200,7 @@ const Logic = (() => {
   /* ---------- 밸런싱 ---------- */
   function balanceInfo(s, eventId) {
     const tables = openTables(s, eventId);
-    const counts = tables.map(t => ({ table: t, n: tablePlayers(s, t.id).length, cap: usableSeats(t) }));
+    const counts = tables.map(t => ({ table: t, n: tablePlayers(s, t.id).length, cap: usableSeats(s, t) }));
     const active = activePlayers(s, eventId).length;
     if (!tables.length) return { tables: counts, need: false, canBreak: false, active, max: 0, min: 0 };
     const max = Math.max.apply(null, counts.map(c => c.n)), min = Math.min.apply(null, counts.map(c => c.n));
@@ -240,5 +254,5 @@ const Logic = (() => {
   }
 
   return { rand, pick, shuffle, eventOf, tableOf, playerOf, openTables, allTables, eventPlayers, activePlayers, bustedPlayers, tablePlayers, seatPlayer, emptySeats, usableSeats,
-    createEvent, updateEvent, deleteEvent, openTable, toggleSeat, closeTable, reopenTable, deleteTable, pickSeat, register, cancelRegistration, movePlayer, bustOut, unbust, balanceInfo, autoBalance, issueVoucher, prizePool, normalizePayouts, payoutTable, payoutRow, payoutFor, payoutTotal, toggleTable, tableUsable, nextTableNumber, usedTableNumbers };
+    createEvent, updateEvent, deleteEvent, openTable, toggleSeat, closeTable, reopenTable, deleteTable, pickSeat, register, cancelRegistration, movePlayer, bustOut, unbust, balanceInfo, autoBalance, issueVoucher, prizePool, normalizePayouts, payoutTable, payoutRow, payoutFor, payoutTotal, toggleTable, tableUsable, nextTableNumber, usedTableNumbers, toggleEventSeat, disabledSeatSet, playersOnDisabledSeats };
 })();
