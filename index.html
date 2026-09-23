@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Holdem TD</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="topbar-row">
+    <select id="eventSelect" class="event-select" title="이벤트 선택"></select>
+    <div class="hist-btns">
+      <button id="btnUndo" class="icon-btn" title="되돌리기">↶</button>
+      <button id="btnRedo" class="icon-btn" title="다시 실행">↷</button>
+    </div>
+  </div>
+  <div id="statBar" class="stat-bar"></div>
+</header>
+
+<main id="view"></main>
+
+<nav id="tabbar">
+  <a href="#reg" data-tab="reg"><span class="ico">✎</span>등록</a>
+  <a href="#tables" data-tab="tables"><span class="ico">▦</span>테이블</a>
+  <a href="#events" data-tab="events"><span class="ico">★</span>이벤트</a>
+  <a href="#print" data-tab="print"><span class="ico">⎙</span>용지</a>
+</nav>
+
+<div id="toast"></div>
+<div id="sheet" class="sheet hidden"></div>
+<div id="print-root"></div>
+
+<script src="js/store.js"></script>
+<script src="js/logic.js"></script>
+<script src="js/print.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+.claude/
+*.tmp.js
+Thumbs.db
+.DS_Store
