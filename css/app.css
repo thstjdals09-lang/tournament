@@ -97,6 +97,8 @@ main#view{padding:12px;padding-bottom:calc(var(--tabH) + 20px + env(safe-area-in
 .tbl-toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:6px}
 .tbl-toggle{display:flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:7px 9px;cursor:pointer}
 .tbl-toggle.off{color:#5b6370;border-style:dashed;background:var(--seatOff)}
+.tbl-toggle.locked{cursor:default;opacity:.85;border-color:var(--accent-strong)}
+.tbl-toggle.locked.off{border-color:var(--line)}
 .tbl-toggle .muted{margin-left:auto}
 
 /* 리스트 */
@@ -142,8 +144,9 @@ main#view{padding:12px;padding-bottom:calc(var(--tabH) + 20px + env(safe-area-in
 @media (min-width:600px){.kpis{grid-template-columns:repeat(5,1fr)}}
 @media (min-width:900px){
   body{display:flex;flex-direction:column;min-height:100vh}
-  #topbar{order:0}
-  #tabbar{order:1;position:static;height:auto;padding:0 12px;flex-direction:row;justify-content:flex-start;gap:4px;border-top:0;border-bottom:1px solid var(--line)}
+  /* 상단바와 탭바를 함께 고정: 스크롤해도 탭이 가려지지 않도록 */
+  #topbar{order:0;position:sticky;top:0;z-index:22}
+  #tabbar{order:1;position:sticky;top:var(--topbarH,96px);z-index:21;height:auto;padding:0 12px;flex-direction:row;justify-content:flex-start;gap:4px;border-top:0;border-bottom:1px solid var(--line)}
   #tabbar a{flex:0 0 auto;padding:10px 18px;border-top:0;border-bottom:2px solid transparent}
   #tabbar a.active{border-bottom-color:var(--accent)}
   main#view{order:2;padding-bottom:40px;width:100%}

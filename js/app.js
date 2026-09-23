@@ -85,6 +85,7 @@ const App = (() => {
   /* ---------- 등록 탭 ---------- */
   function ensureRegSeat() {
     const ev = curEvent(); if (!ev) { ui.regSeat = null; return; }
+    if (!ui.seatPick) { ui.regSeat = null; return; }
     const s = S();
     if (ui.regSeat) {
       const t = L.tableOf(s, ui.regSeat.tableId);
@@ -101,33 +102,33 @@ const App = (() => {
     const all = L.eventPlayers(s, ev.id);
     const q = ui.regSearch.trim().toLowerCase();
     const list = all.filter(p => !q || p.name.toLowerCase().includes(q) || String(p.entryNo) === q || (p.phone || '').includes(q)).sort((a, b) => b.registeredAt - a.registeredAt);
-    const gross = all.reduce((n, p) => n + (p.buyIn || 0), 0);
     const dupe = f.name.trim() && all.some(p => p.name.trim().toLowerCase() === f.name.trim().toLowerCase());
-    const nextNo = L.nextTableNumber(s, ev);
-    const seatTxt = ui.regSeat ? `${tableName(s, ui.regSeat.tableId)} · S${ui.regSeat.seat}` : (s.settings.autoOpenTable ? (nextNo ? `새 테이블 T${nextNo} 자동 오픈` : '테이블 번호 범위 소진') : '빈 좌석 없음');
     const offSet = new Set(ev.disabledSeats || []);
+    const offTables = new Set(ev.disabledTables || []);
     const strays = L.playersOnDisabledSeats(s, ev.id);
-    // 직접 선택용: 빈 좌석 있는 테이블 (인원 적은 순)
-    const manualTables = tables.filter(t => L.tableUsable(t) && L.emptySeats(s, t).length).sort((a, b) => L.tablePlayers(s, a.id).length - L.tablePlayers(s, b.id).length);
+    const manualTables = tables.filter(t => L.tableUsable(t) && L.emptySeats(s, t).length).sort((a, b) => a.number - b.number);
     const manualT = ui.regSeat ? L.tableOf(s, ui.regSeat.tableId) : manualTables[0];
+    const tStart = ev.tableStart || 1;
+    const lastOpen = L.openTables(s, ev.id).slice(-1)[0];
+    const tEnd = ev.tableEnd || Math.max(tStart + 19, (lastOpen ? lastOpen.number : tStart) + 5);
+    const numbers = []; for (let n = tStart; n <= tEnd && numbers.length < 200; n++) numbers.push(n);
     return `
     <div class="card">
-      <h2>등록 <span class="muted small">${h(ev.name)} · 바이인 ${money(ev.buyIn)}원${ev.status === 'closed' ? ' · 종료된 이벤트' : ''}</span></h2>
+      <h2>등록 <span class="muted small">${h(ev.name)}${ev.status === 'closed' ? ' · 종료된 이벤트' : ''}</span></h2>
       <form id="regForm" autocomplete="off">
         <div class="row">
           <label class="field"><span>이름 *</span><input name="name" value="${h(f.name)}" required placeholder="플레이어 이름" autofocus>${dupe ? '<span class="small warn-text">같은 이름이 이미 등록되어 있습니다. 리엔트리라면 메모에 표시하세요.</span>' : ''}</label>
           <label class="field"><span>연락처</span><input name="phone" value="${h(f.phone)}" placeholder="선택"></label>
         </div>
         <div class="row">
-          <label class="field"><span>바이인 (원)</span><input name="buyIn" type="number" value="${h(f.buyIn)}" placeholder="${ev.buyIn}"></label>
           <label class="field"><span>메모</span><input name="memo" value="${h(f.memo)}" placeholder="리엔트리, 애드온 등"></label>
         </div>
         <div class="assign-box">
-          <div><div class="small muted">배정 좌석 (무작위)</div><div class="big">${seatTxt}</div></div>
-          <span style="flex:1"></span>
-          <button type="button" class="sm" id="btnReroll" ${tables.length ? '' : 'disabled'}>다시 뽑기</button>
-          ${manualTables.length ? `<select id="manTable" class="sm-select">${manualTables.map(t => `<option value="${t.id}" ${manualT && manualT.id === t.id ? 'selected' : ''}>T${t.number} (${L.tablePlayers(s, t.id).length}/${L.usableSeats(s, t)})</option>`).join('')}</select>
-          <select id="manSeat" class="sm-select">${(manualT ? L.emptySeats(s, manualT) : []).map(n => `<option value="${n}" ${ui.regSeat && ui.regSeat.seat === n ? 'selected' : ''}>S${n}</option>`).join('')}</select>` : ''}
+          <label class="chk"><input type="checkbox" id="chkSeatPick" ${ui.seatPick ? 'checked' : ''} ${manualTables.length ? '' : 'disabled'}>좌석 지정</label>
+          ${ui.seatPick && manualTables.length ? `
+            <select id="manTable" class="sm-select">${manualTables.map(t => `<option value="${t.id}" ${manualT && manualT.id === t.id ? 'selected' : ''}>T${t.number} (${L.tablePlayers(s, t.id).length}/${L.usableSeats(s, t)})</option>`).join('')}</select>
+            <select id="manSeat" class="sm-select">${(manualT ? L.emptySeats(s, manualT) : []).map(n => `<option value="${n}" ${ui.regSeat && ui.regSeat.seat === n ? 'selected' : ''}>S${n}</option>`).join('')}</select>`
+            : '<span class="small muted">지정하지 않으면 빈 좌석 중 무작위로 배정됩니다</span>'}
         </div>
         <div class="row">
           <button type="submit" class="primary" data-print="1">등록 + 확인증 인쇄</button>
@@ -137,20 +138,28 @@ const App = (() => {
     </div>
 
     <div class="card">
-      <div class="row tight" style="margin-bottom:6px"><h3 style="margin:0">좌석 번호 사용 설정</h3><span class="muted small">모든 테이블 공통 · 체크 해제한 번호에는 배정하지 않습니다</span></div>
+      <div class="row tight" style="margin-bottom:6px"><h3 style="margin:0">좌석 번호 사용 설정</h3><span class="muted small">이 이벤트의 모든 테이블 공통 · 체크 해제한 번호에는 배정하지 않습니다</span></div>
       <div class="seatnums">${Array.from({ length: ev.seats }, (_, i) => i + 1).map(n => `<label class="seatnum ${offSet.has(n) ? 'off' : ''}"><input type="checkbox" ${offSet.has(n) ? '' : 'checked'} data-evseat="${n}"><span>${n}</span></label>`).join('')}</div>
       ${strays.length ? `<div class="banner warn" style="margin:10px 0 0"><span class="grow">사용 안함 좌석에 앉아있는 플레이어 ${strays.length}명: ${strays.slice(0, 5).map(p => h(p.name) + ' (' + tableName(s, p.tableId) + ' S' + p.seat + ')').join(', ')}${strays.length > 5 ? ' 외' : ''} — 테이블 탭에서 이동시켜 주세요.</span></div>` : ''}
     </div>
 
     <div class="card">
-      <div class="row tight" style="margin-bottom:6px"><h3 style="margin:0">테이블 사용 설정</h3><span class="muted small">범위 T${ev.tableStart || 1}~${ev.tableEnd || '∞'} · 체크 해제 = 새 배정 제외</span><span style="flex:1"></span><button class="sm ghost" id="btnOpenTableReg">테이블 열기</button></div>
-      <div class="tbl-toggle-grid">${tables.map(t => `<label class="tbl-toggle ${t.enabled === false ? 'off' : ''}"><input type="checkbox" ${t.enabled === false ? '' : 'checked'} data-ttoggle="${t.id}"><b>T${t.number}</b><span class="muted small">${L.tablePlayers(s, t.id).length}/${L.usableSeats(s, t)}</span></label>`).join('') || '<div class="muted small">오픈된 테이블이 없습니다. 첫 등록 시 자동으로 열립니다.</div>'}</div>
+      <div class="row tight" style="margin-bottom:6px"><h3 style="margin:0">테이블 사용 설정</h3><span class="muted small">이 이벤트 범위 T${tStart}~${ev.tableEnd || '제한 없음'} · 체크 해제한 번호는 열리지 않습니다 · 이미 열린 테이블은 변경 불가</span><span style="flex:1"></span><button class="sm ghost" id="btnOpenTableReg">테이블 열기</button></div>
+      <div class="tbl-toggle-grid">${numbers.map(n => {
+        const t = tables.find(x => x.number === n);
+        const other = !t && L.usedTableNumbers(s).has(n);
+        const off = offTables.has(n);
+        const locked = !!t || other;
+        return `<label class="tbl-toggle ${off ? 'off' : ''} ${locked ? 'locked' : ''}" title="${other ? '다른 이벤트에서 사용 중' : (t ? '열려 있는 테이블입니다' : '')}">
+          <input type="checkbox" ${off ? '' : 'checked'} ${locked ? 'disabled' : ''} data-evtable="${n}"><b>T${n}</b>
+          <span class="muted small">${t ? L.tablePlayers(s, t.id).length + '/' + L.usableSeats(s, t) : (other ? '타 이벤트' : (off ? '사용안함' : '대기'))}</span></label>`;
+      }).join('')}</div>
     </div>
 
     <div class="card">
-      <div class="row tight" style="margin-bottom:8px"><h3 style="margin:0">등록자 <span class="muted small">${all.length}명 · 총 바이인 ${money(gross)}원</span></h3></div>
+      <div class="row tight" style="margin-bottom:8px"><h3 style="margin:0">등록자 <span class="muted small">${all.length}명</span></h3></div>
       <input id="regSearch" placeholder="이름 / 엔트리번호 / 연락처 검색" value="${h(ui.regSearch)}" style="margin-bottom:8px">
-      <div class="list">${list.map(p => `<div class="list-item"><span class="rank">#${p.entryNo}</span><div class="grow"><div class="t">${h(p.name)} <span class="muted small">${seatLabel(s, p)}</span></div><div class="s">${Print.fmtTime(p.registeredAt)} · ${money(p.buyIn)}원${p.phone ? ' · ' + h(p.phone) : ''}${p.memo ? ' · ' + h(p.memo) : ''}</div></div>
+      <div class="list">${list.map(p => `<div class="list-item"><span class="rank">#${p.entryNo}</span><div class="grow"><div class="t">${h(p.name)} <span class="muted small">${seatLabel(s, p)}</span></div><div class="s">${Print.fmtTime(p.registeredAt)}${p.phone ? ' · ' + h(p.phone) : ''}${p.memo ? ' · ' + h(p.memo) : ''}</div></div>
         <button class="sm ghost" data-pmenu="${p.id}">관리</button></div>`).join('') || `<div class="muted">${q ? '검색 결과 없음' : '아직 등록이 없습니다.'}</div>`}</div>
     </div>`;
   }
@@ -168,12 +177,12 @@ const App = (() => {
       if (res.error) { toast(res.error); return; }
       const p = res.player; const st = S();
       toast(`#${p.entryNo} ${p.name} → ${tableName(st, p.tableId)} S${p.seat}${res.openedTable ? ' (새 테이블 오픈)' : ''}`);
-      ui.regForm = { name: '', phone: '', buyIn: '', memo: '' }; ui.regSeat = null;
+      ui.regForm = { name: '', phone: '', buyIn: '', memo: '' }; ui.regSeat = null; ui.seatPick = false;
       render();
       if (printFlag && st.settings.autoPrintOnRegister !== false) printConfirm(p.id);
       const n = $('#regForm input[name=name]'); if (n) n.focus();
     });
-    $('#btnReroll', root).addEventListener('click', () => { ui.regSeat = L.pickSeat(S(), curEvent().id); render(); });
+    $('#chkSeatPick', root).addEventListener('change', (e) => { ui.seatPick = e.target.checked; if (!ui.seatPick) ui.regSeat = null; render(); });
     const mt = $('#manTable', root), ms = $('#manSeat', root);
     if (mt) {
       mt.addEventListener('change', () => { const t = L.tableOf(S(), mt.value); const e = L.emptySeats(S(), t); ui.regSeat = e.length ? { tableId: t.id, seat: e[0] } : null; render(); });
@@ -183,8 +192,8 @@ const App = (() => {
     $$('input[data-evseat]', root).forEach(cb => cb.addEventListener('change', () => {
       Store.commit('좌석 번호 사용 변경', st => L.toggleEventSeat(st, curEvent().id, +cb.dataset.evseat));
     }));
-    $$('input[data-ttoggle]', root).forEach(cb => cb.addEventListener('change', () => {
-      Store.commit('테이블 사용 변경', st => L.toggleTable(st, cb.dataset.ttoggle));
+    $$('input[data-evtable]', root).forEach(cb => cb.addEventListener('change', () => {
+      Store.commit('테이블 사용 변경', st => L.toggleEventTable(st, curEvent().id, +cb.dataset.evtable));
     }));
     const search = $('#regSearch', root);
     search.addEventListener('input', () => { ui.regSearch = search.value; const pos = search.selectionStart; render(); const s2 = $('#regSearch'); s2.focus(); s2.setSelectionRange(pos, pos); });
@@ -194,7 +203,7 @@ const App = (() => {
     const s = S(); const p = L.playerOf(s, pid); if (!p) return;
     const actions = [
       { label: '참가확인증 재인쇄', fn: () => printConfirm(pid) },
-      { label: '정보 수정 (이름 / 연락처 / 바이인 / 메모)', fn: () => editPlayer(pid) },
+      { label: '정보 수정 (이름 / 연락처 / 메모)', fn: () => editPlayer(pid) },
     ];
     if (p.status === 'busted') actions.push({ label: '리엔트리 (같은 정보로 새 등록)', cls: 'primary', fn: () => {
       ui.regForm = { name: p.name, phone: p.phone || '', buyIn: '', memo: '리엔트리' }; ui.regSeat = null; render();
@@ -203,15 +212,14 @@ const App = (() => {
     actions.push({ label: '등록 취소 (삭제)', cls: 'danger', fn: () => {
       if (confirm(`#${p.entryNo} ${p.name} 등록을 취소(삭제)할까요?`)) { Store.commit('등록 취소: ' + p.name, st => L.cancelRegistration(st, p.id)); toast('등록 취소됨 (되돌리기 가능)'); }
     } });
-    sheet(`#${p.entryNo} ${p.name} · ${seatLabel(s, p)}`, actions, `<div class="muted small" style="margin-bottom:10px">${money(p.buyIn)}원${p.phone ? ' · ' + h(p.phone) : ''}${p.memo ? ' · ' + h(p.memo) : ''} · ${Print.fmtTime(p.registeredAt)} 등록</div>`);
+    sheet(`#${p.entryNo} ${p.name} · ${seatLabel(s, p)}`, actions, `<div class="muted small" style="margin-bottom:10px">${p.phone ? h(p.phone) + ' · ' : ''}${p.memo ? h(p.memo) + ' · ' : ''}${Print.fmtTime(p.registeredAt)} 등록</div>`);
   }
   function editPlayer(pid) {
     const p = L.playerOf(S(), pid); if (!p) return;
     const name = prompt('이름', p.name); if (name === null) return;
     const phone = prompt('연락처', p.phone || ''); if (phone === null) return;
-    const buyIn = prompt('바이인 (원)', p.buyIn); if (buyIn === null) return;
     const memo = prompt('메모', p.memo || ''); if (memo === null) return;
-    Store.commit('정보 수정: ' + p.name, st => { const x = L.playerOf(st, pid); x.name = name.trim() || x.name; x.phone = phone.trim(); x.buyIn = +buyIn || 0; x.memo = memo.trim(); });
+    Store.commit('정보 수정: ' + p.name, st => { const x = L.playerOf(st, pid); x.name = name.trim() || x.name; x.phone = phone.trim(); x.memo = memo.trim(); });
     toast('저장됨');
   }
   function printConfirm(playerId) {
@@ -286,6 +294,8 @@ const App = (() => {
     } else if (info.tables.length) {
       banner = `<div class="banner ok"><span class="grow">테이블 균형 양호 · 남은 ${info.active}명 / ${info.tables.length}테이블 · 평균 ${avg.toFixed(1)}명</span></div>`;
     }
+    const sortLabels = { numAsc: '번호 오름차순', numDesc: '번호 내림차순', cntAsc: '인원 적은순', cntDesc: '인원 많은순' };
+    const filterLabels = { all: '오픈 전체', empty: '빈 좌석 있음', over: '평균 초과', under: '평균 미만', closed: '닫힌 테이블' };
     const sortBtn = (k, lb) => `<button class="sm ${ui.tblSort === k ? 'primary' : 'ghost'}" data-sort="${k}">${lb}</button>`;
     const filtBtn = (k, lb, n) => `<button class="sm ${ui.tblFilter === k ? 'primary' : 'ghost'}" data-filter="${k}">${lb}${n != null ? ` <span class="cnt-badge">${n}</span>` : ''}</button>`;
     const allOpen = L.openTables(s, ev.id);
@@ -299,10 +309,16 @@ const App = (() => {
         <input id="tblSearch" placeholder="플레이어 이름 / 엔트리번호 / 테이블번호" value="${h(ui.tblSearch)}" style="flex:1;min-width:180px">
       </div>
       <div class="row tight" style="margin-top:8px">
-        <span class="muted small">정렬</span>${sortBtn('numAsc', '번호 오름차순')}${sortBtn('numDesc', '번호 내림차순')}${sortBtn('cntAsc', '인원 적은순')}${sortBtn('cntDesc', '인원 많은순')}
+        <button class="sm ghost" id="btnTools">정렬 · 보기 ${ui.tblToolsOpen ? '접기' : '열기'}</button>
+        <span class="muted small">${sortLabels[ui.tblSort]} · ${filterLabels[ui.tblFilter]} · ${tables.length}개 표시</span>
       </div>
-      <div class="row tight" style="margin-top:8px">
-        <span class="muted small">보기</span>${filtBtn('all', '오픈 전체', allOpen.length)}${filtBtn('empty', '빈 좌석 있음', nEmpty)}${filtBtn('over', '평균 초과', nOver)}${filtBtn('under', '평균 미만', nUnder)}${filtBtn('closed', '닫힌 테이블', nClosed)}
+      <div class="${ui.tblToolsOpen ? '' : 'hidden'}">
+        <div class="row tight" style="margin-top:8px">
+          <span class="muted small">정렬</span>${sortBtn('numAsc', '번호 오름차순')}${sortBtn('numDesc', '번호 내림차순')}${sortBtn('cntAsc', '인원 적은순')}${sortBtn('cntDesc', '인원 많은순')}
+        </div>
+        <div class="row tight" style="margin-top:8px">
+          <span class="muted small">보기</span>${filtBtn('all', '오픈 전체', allOpen.length)}${filtBtn('empty', '빈 좌석 있음', nEmpty)}${filtBtn('over', '평균 초과', nOver)}${filtBtn('under', '평균 미만', nUnder)}${filtBtn('closed', '닫힌 테이블', nClosed)}
+        </div>
       </div>
     </div>
     <div class="tables-grid" id="tables">${tables.map(t => seatMapHtml(s, t, hitIds)).join('') || `<div class="muted card">${q ? '검색 결과가 없습니다.' : '표시할 테이블이 없습니다.'}</div>`}</div>`;
@@ -311,6 +327,7 @@ const App = (() => {
     if (!curEvent()) { bindNoEvent(root); return; }
     const ev = curEvent();
     $('#btnOpenTable', root).addEventListener('click', () => askOpenTable(ev.id));
+    $('#btnTools', root).addEventListener('click', () => { ui.tblToolsOpen = !ui.tblToolsOpen; render(); });
     $$('[data-sort]', root).forEach(b => b.addEventListener('click', () => { ui.tblSort = b.dataset.sort; render(); }));
     $$('[data-filter]', root).forEach(b => b.addEventListener('click', () => { ui.tblFilter = b.dataset.filter; render(); }));
     const search = $('#tblSearch', root);
@@ -362,7 +379,7 @@ const App = (() => {
       { label: '이동 — 테이블 선택', fn: () => moveSheet(pid) },
       { label: '이동 — 화면에서 좌석 탭 (자리 교환 가능)', fn: () => { ui.moveMode = { playerId: pid }; render(); } },
       { label: '버스트아웃 (탈락 처리)', cls: 'danger', fn: () => doBust(pid) },
-    ], `<div class="muted small" style="margin-bottom:10px">바이인 ${money(p.buyIn)}원${p.memo ? ' · ' + h(p.memo) : ''}</div>`);
+    ], p.memo ? `<div class="muted small" style="margin-bottom:10px">${h(p.memo)}</div>` : '');
   }
   function doBust(pid) {
     const p = L.playerOf(S(), pid); let r;
@@ -646,11 +663,17 @@ const App = (() => {
 
   /* ---------- 렌더 루프 ---------- */
   const VIEWS = { reg: [viewReg, bindReg], tables: [viewTables, bindTables], events: [viewEvents, bindEvents], print: [viewPrint, bindPrint] };
+  /** 데스크톱에서 탭바를 상단바 바로 아래에 고정하기 위한 높이 측정 */
+  function syncTopbarHeight() {
+    const tb = $('#topbar'); if (!tb) return;
+    document.documentElement.style.setProperty('--topbarH', tb.offsetHeight + 'px');
+  }
   function render() {
     renderTop();
     const v = VIEWS[ui.tab] || VIEWS.reg;
     const root = $('#view'); root.innerHTML = v[0](); v[1](root);
     $$('#tabbar a').forEach(a => a.classList.toggle('active', a.dataset.tab === ui.tab));
+    syncTopbarHeight();
   }
   function init() {
     Store.subscribe(render);
@@ -661,6 +684,7 @@ const App = (() => {
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); e.shiftKey ? Store.redo() : Store.undo(); }
     });
+    window.addEventListener('resize', syncTopbarHeight);
     if (!S().selectedEventId && S().events.length) Store.patch(st => st.selectedEventId = st.events[0].id);
     render();
   }
