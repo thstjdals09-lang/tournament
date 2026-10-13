@@ -37,14 +37,15 @@ const App = (() => {
     const el = $('#toast'); el.textContent = msg; el.classList.add('show');
     clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), ms || 2200);
   }
+  let sheetSeq = 0; // 시트 버튼이 다른 시트를 열면(예: 이동 → 테이블 선택) 새 시트를 닫지 않도록 구분
   function sheet(title, actions, bodyHtml, onBind) {
-    const el = $('#sheet');
+    const el = $('#sheet'); const seq = ++sheetSeq;
     el.innerHTML = `<div class="sheet-body"><h3>${h(title)}</h3>${bodyHtml || ''}<div class="sheet-actions">${actions.map((a, i) => `<button class="${a.cls || ''}" data-i="${i}">${a.label}</button>`).join('')}<button class="ghost" data-i="-1">닫기</button></div></div>`;
     el.classList.remove('hidden');
     el.onclick = (e) => {
       if (e.target === el) { closeSheet(); return; }
       const b = e.target.closest('button[data-i]'); if (!b) return;
-      const i = +b.dataset.i; const keep = i >= 0 && actions[i].fn(el) === 'keep'; if (!keep) closeSheet();
+      const i = +b.dataset.i; const keep = i >= 0 && actions[i].fn(el) === 'keep'; if (!keep && sheetSeq === seq) closeSheet();
     };
     if (onBind) onBind(el);
   }
@@ -458,13 +459,13 @@ const App = (() => {
   }
   /** 빠른 탈락: 테이블·좌석 번호로 찾아서 탈락 처리 */
   function quickBustSheet(eventId) {
-    const s = S(); const ts = L.openTables(s, eventId);
-    const body = `<div class="row"><label class="field"><span>테이블</span><select id="qbT">${ts.map(t => `<option value="${t.id}">T${t.number}</option>`).join('')}</select></label>
+    const s = S(); const ts = L.openTables(s, eventId).slice().sort((a, b) => (L.tablePlayers(s, b.id).length ? 1 : 0) - (L.tablePlayers(s, a.id).length ? 1 : 0) || a.number - b.number);
+    const body = `<div class="row"><label class="field"><span>테이블</span><select id="qbT">${ts.map(t => `<option value="${t.id}">T${t.number} (${L.tablePlayers(s, t.id).length}명)</option>`).join('')}</select></label>
       <label class="field"><span>좌석</span><select id="qbS"></select></label></div><div id="qbWho" class="assign-box"></div>`;
     let pid = null;
     sheet('빠른 탈락', [{ label: '이 플레이어 탈락 처리', cls: 'danger', fn: () => { if (!pid) { toast('그 좌석에 플레이어가 없습니다'); return 'keep'; } const id = pid; setTimeout(() => bustSheet(id), 0); } }], body, (el) => {
       const tSel = $('#qbT', el), sSel = $('#qbS', el), who = $('#qbWho', el);
-      const show = () => { const p = L.seatPlayer(S(), tSel.value, +sSel.value); pid = p ? p.id : null; who.innerHTML = p ? `<span class="big">${h(p.name)}</span><span class="muted small">#${p.entryNo}</span>` : '<span class="muted">빈 좌석</span>'; };
+      const show = () => { const p = L.seatPlayer(S(), tSel.value, +sSel.value); pid = p ? p.id : null; who.innerHTML = p ? `<span class="big">${h(p.name)}</span><span class="muted small">#${p.entryNo}</span>` : '<span class="muted">이 테이블에 플레이어가 없습니다</span>'; };
       const fill = () => { const t = L.tableOf(S(), tSel.value); sSel.innerHTML = L.tablePlayers(S(), t.id).sort((a, b) => a.seat - b.seat).map(p => `<option value="${p.seat}">S${p.seat} ${h(p.name)}</option>`).join(''); show(); };
       tSel.addEventListener('change', fill); sSel.addEventListener('change', show); fill();
     });
@@ -1044,7 +1045,7 @@ const App = (() => {
         r.onload = () => { try { Store.importJSON(r.result); toast('가져오기 완료'); } catch (err) { toast('가져오기 실패: ' + err.message); } };
         r.readAsText(f);
       });
-      $('#btnReset', root).addEventListener('click', () => { if (confirm('모든 이벤트/참가자/테이블/바우처를 삭제합니다. 계속할까요?') && confirm('정말로 초기화할까요? (되돌리기 1회 가능)')) { Store.reset(); toast('초기화됨'); } });
+      $('#btnReset', root).addEventListener('click', () => { if (confirm('모든 이벤트/참가자/테이블/바우처를 삭제합니다. 계속할까요?') && confirm('정말로 초기화할까요? (되돌리기 1회 가능)')) { Store.reset(); toast('초기화됨'); location.hash = '#home'; } });
     }
   }
 

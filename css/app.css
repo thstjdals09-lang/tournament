@@ -192,6 +192,10 @@ body.at-home .home-title{display:block}
 }
 #print-root{display:none}
 
+/* 컨바인 시트의 테이블 고르기 */
+.tbl-toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:6px}
+.tbl-toggle{display:flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:7px 9px;cursor:pointer}
+.tbl-toggle .muted{margin-left:auto}
 /* 설정 탭 */
 .set-head{display:flex;flex-direction:column;gap:10px}
 .set-nav{display:flex;gap:6px;flex-wrap:wrap}
