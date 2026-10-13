@@ -141,6 +141,40 @@ main#view{padding:12px;padding-bottom:calc(var(--tabH) + 20px + env(safe-area-in
 .preview-wrap{background:#4a4f57;padding:16px;border-radius:var(--radius);overflow:auto}
 .paper{background:#fff;color:#000;margin:0 auto;box-shadow:0 2px 12px #0008;font-family:"Noto Sans KR","Malgun Gothic",sans-serif}
 
+
+/* 클락 탭 */
+.clock{text-align:center;display:grid;gap:8px;padding:20px 14px}
+.clk-level{font-size:13px;font-weight:600;letter-spacing:.08em;color:var(--muted)}
+.clk-time{font-size:clamp(56px,13vw,120px);font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+.clk-blinds{font-size:clamp(22px,4vw,32px);font-weight:600;font-variant-numeric:tabular-nums}
+.clk-ctrl{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+.clk-main{min-width:120px}
+.clk-chip{text-decoration:none;color:var(--accent);border-color:var(--accent-strong);font-variant-numeric:tabular-nums}
+.lv-tbl input{padding:5px 7px;width:100px;text-align:right}
+.lv-tbl tr.cur td{background:#18222d}
+.nowrap{white-space:nowrap}
+.kpis .v{font-variant-numeric:tabular-nums}
+
+/* 딜러 탭 */
+.dealer-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px}
+.dealer-slot{background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius);padding:8px 10px;display:grid;gap:6px}
+.dealer-slot.none{border-color:#6f5a33}
+.dealer-slot select{width:100%}
+
+/* 전광판: 테마와 무관하게 고정 */
+.board{position:fixed;inset:0;z-index:60;background:#0a0e12;color:#eef2f6;display:grid;grid-template-rows:auto 1fr auto;padding:calc(18px + env(safe-area-inset-top)) 24px calc(18px + env(safe-area-inset-bottom));text-align:center}
+.bd-top{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:clamp(16px,2.4vw,28px);font-weight:700}
+.bd-top button{background:transparent;border-color:#2e343d;color:#8a919c;font-size:14px}
+.bd-mid{display:grid;align-content:center;gap:1vh}
+.bd-level{font-size:clamp(18px,3vw,36px);letter-spacing:.12em;color:var(--accent);font-weight:700}
+.bd-time{font-size:clamp(90px,24vw,340px);font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+.bd-blinds{font-size:clamp(30px,6vw,84px);font-weight:700;font-variant-numeric:tabular-nums}
+.bd-next{color:#8a919c;font-size:clamp(16px,2.4vw,30px)}
+.bd-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.bd-stats div{display:grid}
+.bd-stats span{color:#8a919c;font-size:clamp(12px,1.4vw,18px)}
+.bd-stats b{font-size:clamp(20px,3vw,40px);font-variant-numeric:tabular-nums}
+
 @media (min-width:600px){.kpis{grid-template-columns:repeat(5,1fr)}}
 @media (min-width:900px){
   body{display:flex;flex-direction:column;min-height:100vh}

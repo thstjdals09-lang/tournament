@@ -180,9 +180,12 @@ const Logic = (() => {
     p.tableId = tableId; p.seat = seat;
     return { swapped: other || null };
   }
-  function bustOut(s, playerId) {
+  /** knockedById: 아웃시킨 플레이어(선택). 그 사람의 knockouts 를 1 올린다 */
+  function bustOut(s, playerId, knockedById) {
     const p = playerOf(s, playerId); if (!p || p.status !== 'active') return { error: '이미 탈락' };
     const remaining = activePlayers(s, p.eventId).length; // 탈락 시점 남은 인원 = 최종 순위
+    const by = knockedById ? playerOf(s, knockedById) : null;
+    p.knockedBy = by ? by.id : null; if (by) by.knockouts = (by.knockouts || 0) + 1;
     p.status = 'busted'; p.finishRank = remaining; p.bustedAt = Date.now();
     p.lastSeat = { tableId: p.tableId, seat: p.seat };
     p.tableId = null; p.seat = null;
@@ -201,6 +204,7 @@ const Logic = (() => {
       if (!s.settings.autoOpenTable) return { error: '빈 좌석 없음' };
       const ot = openTable(s, p.eventId); if (ot.error) return { error: ot.error }; target = pickSeat(s, p.eventId);
     }
+    if (p.knockedBy) { const by = playerOf(s, p.knockedBy); if (by && by.knockouts) by.knockouts--; p.knockedBy = null; }
     p.status = 'active'; p.tableId = target.tableId; p.seat = target.seat; p.finishRank = null; p.bustedAt = null;
     return target;
   }
