@@ -96,6 +96,8 @@ const Floor = (() => {
   }
   const togglePause = (s) => run(s, (d, now) => d.clock.paused ? DE.resumeClock(d, now) : DE.pauseClock(d, now));
   const setPushMinutes = (s, m) => run(s, (d, now) => DE.updateSettings(d, { pushMinutes: m }, now));
+  /** 설정 > 딜러: DD 설정(교대 간격·자동 교대·최대 연속 근무·최소 휴식 등)을 DD 함수로 바꾼다 */
+  const setDD = (s, patch) => run(s, (d, now) => DE.updateSettings(d, patch, now));
   const nextPushIn = (s) => s.dd ? DE.msToPush(s.dd, Date.now()) : null;
   /** 자동 교대 시각이 됐나 */
   const pushDue = (s) => { const d = s.dd; return !!(d && d.clock.running && !d.clock.paused && d.settings.autoPush && DE.msToPush(d, Date.now()) <= 0); };
@@ -103,5 +105,5 @@ const Floor = (() => {
   const seatedMin = (s, d) => Math.max(0, Math.floor((DE.clockNow(s.dd, Date.now()) - d.since) / 60000));
 
   return { defaultLevels, levels, clockOf, ensure, remain, levelNo, levelLabel, blindText, mmss, currentBB, breakIn, lateRegOpen, start, pause, setLevel, addTime, advance,
-    DE, dd, sync, dealerAt, dealers, attend, sendHome, checkBack, toggleHold, assign, relieve, rotate, togglePause, setPushMinutes, nextPushIn, pushDue, planNext, seatedMin };
+    DE, dd, sync, dealerAt, dealers, attend, sendHome, checkBack, toggleHold, assign, relieve, rotate, togglePause, setPushMinutes, setDD, nextPushIn, pushDue, planNext, seatedMin };
 })();

@@ -38,7 +38,7 @@ const Logic = (() => {
       id: Store.uid(), name: data.name || '새 이벤트', buyIn: +data.buyIn || 0,
       seats: +data.seats || s.settings.defaultSeats || 9, startChips: +data.startChips || 0,
       status: 'open', createdAt: Date.now(), nextEntryNo: 1, memo: data.memo || '',
-      disabledSeats: [], disabledTables: [], tableStart: +data.tableStart || 1, tableEnd: +data.tableEnd || 0, rakePct: +data.rakePct || 0, prizePool: +data.prizePool || 0, payouts: Array.isArray(data.payouts) ? data.payouts : []
+      disabledSeats: [], tableStart: +data.tableStart || 1, tableEnd: +data.tableEnd || 0, rakePct: +data.rakePct || 0, prizePool: +data.prizePool || 0, payouts: Array.isArray(data.payouts) ? data.payouts : []
     };
     s.events.push(ev);
     if (!s.selectedEventId) s.selectedEventId = ev.id;
@@ -68,23 +68,15 @@ const Logic = (() => {
   /** 이벤트 범위(tableStart~tableEnd) 안에서 비어있는 가장 작은 번호 */
   function nextTableNumber(s, ev) {
     const used = usedTableNumbers(s);
-    const off = new Set(ev.disabledTables || []);
     const start = ev.tableStart || 1, end = ev.tableEnd || 999;
-    for (let n = start; n <= end; n++) if (!used.has(n) && !off.has(n)) return n;
+    for (let n = start; n <= end; n++) if (!used.has(n)) return n;
     return null;
-  }
-  /** 이벤트별 테이블 번호 사용/미사용 (오픈 전 설정, 자동 오픈 대상에서 제외) */
-  function toggleEventTable(s, eventId, number) {
-    const ev = eventOf(s, eventId); if (!ev) return false;
-    const set = new Set(ev.disabledTables || []);
-    if (set.has(number)) set.delete(number); else set.add(number);
-    ev.disabledTables = Array.from(set).sort((a, b) => a - b);
   }
   function openTable(s, eventId, opts) {
     opts = opts || {};
     const ev = eventOf(s, eventId); if (!ev) return { error: '이벤트 없음' };
     let number = +opts.number || 0;
-    if (number) { if (usedTableNumbers(s).has(number)) return { error: 'T' + number + '은(는) 이미 사용 중입니다' }; if ((ev.disabledTables || []).includes(number)) return { error: 'T' + number + '은(는) 사용 안함으로 설정된 테이블입니다' }; }
+    if (number) { if (usedTableNumbers(s).has(number)) return { error: 'T' + number + '은(는) 이미 사용 중입니다' }; }
     else { number = nextTableNumber(s, ev); if (!number) return { error: '테이블 번호 범위(' + (ev.tableStart || 1) + '~' + (ev.tableEnd || '∞') + ')에 빈 번호가 없습니다' }; }
     const t = { id: Store.uid(), eventId, number, seats: +opts.seats || ev.seats, disabledSeats: [], enabled: true, status: 'open', openedAt: Date.now() };
     s.tables.push(t); return t;
@@ -140,6 +132,11 @@ const Logic = (() => {
     if (!cands.length) return null;
     const min = Math.min.apply(null, cands.map(c => c.n));
     cands = cands.filter(c => c.n === min);
+    // 설정 > 레지 > 좌석 배정 방식: 'order' 면 번호가 낮은 테이블·좌석부터 (인원 최소 테이블 우선은 같다)
+    if (s.settings && s.settings.seatMode === 'order') {
+      const c = cands.sort((a, b) => a.t.number - b.t.number)[0];
+      return { tableId: c.t.id, seat: Math.min.apply(null, c.empty) };
+    }
     const c = pick(cands);
     return { tableId: c.t.id, seat: pick(c.empty) };
   }
@@ -216,7 +213,7 @@ const Logic = (() => {
     const active = activePlayers(s, eventId).length;
     if (!tables.length) return { tables: counts, need: false, canBreak: false, active, max: 0, min: 0 };
     const max = Math.max.apply(null, counts.map(c => c.n)), min = Math.min.apply(null, counts.map(c => c.n));
-    const need = max - min >= 2;
+    const need = max - min >= Math.max(2, (s.settings && s.settings.balanceDiff) || 2); // 설정 > 테이블 > 밸런싱 경고 기준
     // 가장 적은 테이블을 빼도 나머지에 전원 수용 가능하면 브레이크 권장
     const smallest = counts.slice().sort((a, b) => a.n - b.n)[0];
     const capWithout = counts.filter(c => c !== smallest).reduce((n, c) => n + c.cap, 0);
@@ -228,7 +225,7 @@ const Logic = (() => {
     const moves = [];
     for (let guard = 0; guard < 200; guard++) {
       const info = balanceInfo(s, eventId);
-      if (!info.need) break;
+      if (info.tables.length < 2) break; // 경고 기준과 상관없이 편차 1 이하까지 맞춘다
       const sorted = info.tables.slice().sort((a, b) => b.n - a.n);
       const big = sorted[0];
       const small = sorted.filter(c => tableUsable(c.table) && emptySeats(s, c.table).length).sort((a, b) => a.n - b.n)[0];
@@ -294,5 +291,5 @@ const Logic = (() => {
   }
 
   return { planCombine, applyCombine, rand, pick, shuffle, eventOf, tableOf, playerOf, openTables, allTables, eventPlayers, activePlayers, bustedPlayers, tablePlayers, seatPlayer, emptySeats, usableSeats,
-    createEvent, updateEvent, deleteEvent, openTable, toggleSeat, closeTable, reopenTable, deleteTable, pickSeat, register, cancelRegistration, movePlayer, bustOut, unbust, balanceInfo, autoBalance, issueVoucher, prizePool, normalizePayouts, payoutTable, payoutRow, payoutFor, payoutTotal, toggleTable, tableUsable, nextTableNumber, usedTableNumbers, toggleEventSeat, toggleEventTable, disabledSeatSet, playersOnDisabledSeats };
+    createEvent, updateEvent, deleteEvent, openTable, toggleSeat, closeTable, reopenTable, deleteTable, pickSeat, register, cancelRegistration, movePlayer, bustOut, unbust, balanceInfo, autoBalance, issueVoucher, prizePool, normalizePayouts, payoutTable, payoutRow, payoutFor, payoutTotal, toggleTable, tableUsable, nextTableNumber, usedTableNumbers, toggleEventSeat, disabledSeatSet, playersOnDisabledSeats };
 })();
