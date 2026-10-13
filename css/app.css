@@ -138,6 +138,13 @@ main#view{padding:12px;padding-bottom:calc(var(--tabH) + 20px + env(safe-area-in
 .home-title{display:none;flex:1;font-weight:700;font-size:16px}
 body.at-home #tabbar,body.at-home #statBar,body.at-home #eventSelect,body.at-home .home-btn{display:none}
 body.at-home .home-title{display:block}
+/* 앱 문(로그인 전): 상단에 제목만, 아래는 DD 로그인 화면(iframe) */
+body.at-gate #tabbar,body.at-gate #statBar,body.at-gate #eventSelect,body.at-gate .home-btn,body.at-gate .hist-btns{display:none}
+body.at-gate .home-title{display:block}
+body.at-gate main#view{padding:0;max-width:none}
+body.at-gate .gate-line{margin:0;padding:8px 14px;text-align:center}
+body.at-gate .gate-line.banner{display:flex;justify-content:center;gap:10px;border-radius:0}
+body.at-gate .dd-frame{height:calc(100vh - var(--topbarH,56px) - 34px);min-height:420px}
 
 /* 클락 탭 */
 .clock{text-align:center;display:grid;gap:8px;padding:20px 14px}
@@ -222,6 +229,25 @@ body.at-home .home-title{display:block}
 @media (max-width:480px){.felt-seat{width:42px;height:42px}.felt-seat b{font-size:14px}.felt-seat small{display:none}}
 /* 딜러 탭: dealer-director iframe */
 .dd-frame{display:block;width:100%;border:0;background:var(--bg);height:calc(100vh - var(--topbarH,96px) - var(--tabH) - env(safe-area-inset-bottom));min-height:480px}
+.dd-frame[hidden]{display:none} /* display:block 이 hidden 속성을 이기지 않게 (딜러 탭·로그인 문에서만 보인다) */
 body.at-dealers #view{padding-bottom:0}
 body.at-dealers .dd-note{margin:0 0 0}
-@media (min-width:900px){.dd-frame{height:calc(100vh - var(--topbarH,96px) - 44px)}}
+@media (min-width:900px){.dd-frame{order:3;height:calc(100vh - var(--topbarH,96px) - 44px)}}
+
+/* 앱 안의 확인창 */
+.dlg{border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);padding:0;width:min(92vw,420px);box-shadow:0 12px 40px #000a}
+.dlg::backdrop{background:#000a}
+.dlg form{padding:18px 18px 14px;display:grid;gap:12px}
+.dlg .dlg-title{font-weight:700;font-size:16px}
+.dlg .dlg-text{font-size:14px;line-height:1.5}
+.dlg .dlg-fields{display:grid;gap:8px}
+.dlg .dlg-fields:empty{display:none}
+.dlg .dlg-fields label{display:grid;gap:4px;font-size:12.5px;color:var(--muted)}
+.dlg .dlg-fields input{width:100%;font-size:15px}
+.dlg .dlg-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+.dlg .dlg-btns button{min-width:84px}
+
+/* 새 버전 토스트 (배포로 파일이 바뀌면 뜬다, 누를 때까지 남는다) */
+.update-toast{position:fixed;left:50%;bottom:calc(var(--tabH) + 64px + env(safe-area-inset-bottom));transform:translateX(-50%);background:#0b0d10;border:1px solid var(--accent);color:#fff;padding:9px 10px 9px 16px;border-radius:6px;font-size:13.5px;z-index:51;display:flex;gap:12px;align-items:center;max-width:92vw;box-shadow:0 6px 24px #000a}
+.update-toast[hidden]{display:none}
+body.at-home .update-toast,body.at-gate .update-toast{bottom:24px}

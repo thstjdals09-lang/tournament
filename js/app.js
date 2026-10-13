@@ -88,11 +88,35 @@ const App = (() => {
       ${info.canBreak && s.settings.breakHint !== false ? `<span class="chip warn">T${info.breakTable.number} 브레이크 가능</span>` : ''}`;
   }
 
-  function askOpenTable(eventId) {
+  /* ---------- 앱 안의 확인창 (#dlg) ----------
+     브라우저 confirm/prompt 대신 쓴다 — 미리보기(아티팩트)나 일부 임베드 환경에서는 브라우저 확인창이 막혀 버튼이 눌려도 아무 일도 안 생긴다(2026-10-13 제보).
+     ask({title, text, fields:[{name,label,value,type}], ok, cancel, danger}) → Promise: 취소면 null, 입력칸 없으면 true, 있으면 {name: 값}
+     시험용 갈고리: ui.autoAnswer = (opts) => 답  (헤드리스 점검 스크립트가 쓴다) */
+  function ask(opts) {
+    const o = Object.assign({ ok: '확인', cancel: '취소', fields: [] }, typeof opts === 'string' ? { text: opts } : opts);
+    const val = () => o.fields.length ? Object.fromEntries(o.fields.map(f => [f.name, String($(`#dlg [name="${f.name}"]`).value)])) : true;
+    if (ui.autoAnswer) return Promise.resolve(ui.autoAnswer(o));
+    const d = $('#dlg');
+    d.querySelector('.dlg-title').textContent = o.title || ''; d.querySelector('.dlg-title').hidden = !o.title;
+    d.querySelector('.dlg-text').innerHTML = o.text ? h(o.text).replace(/\n/g, '<br>') : ''; d.querySelector('.dlg-text').hidden = !o.text;
+    d.querySelector('.dlg-fields').innerHTML = o.fields.map(f => `<label>${f.label ? `<span>${h(f.label)}</span>` : ''}<input name="${f.name}" type="${f.type || 'text'}" value="${h(f.value == null ? '' : String(f.value))}" ${f.placeholder ? `placeholder="${h(f.placeholder)}"` : ''} autocomplete="off"></label>`).join('');
+    const okB = d.querySelector('[value=ok]'), ccB = d.querySelector('.dlg-cancel'); // 취소는 type=button — 입력칸에서 Enter 가 첫 submit 버튼(취소)으로 가지 않게
+    okB.textContent = o.ok; okB.className = o.danger ? 'danger' : 'primary'; ccB.textContent = o.cancel; ccB.hidden = o.cancel === false;
+    return new Promise(resolve => {
+      const done = () => { d.removeEventListener('close', done); resolve(d.returnValue === 'ok' ? val() : null); };
+      d.addEventListener('close', done);
+      d.returnValue = ''; d.showModal();
+      const first = d.querySelector('input'); if (first) { first.focus(); first.select(); } else okB.focus();
+    });
+  }
+  const confirmBox = (text, ok, danger) => ask({ text, ok: ok || '확인', danger }).then(v => v !== null);
+  const promptBox = (text, value, ok) => ask({ text, ok: ok || '확인', fields: [{ name: 'v', value }] }).then(v => v && v.v);
+
+  async function askOpenTable(eventId) {
     const s = S(); const ev = L.eventOf(s, eventId);
     const next = L.nextTableNumber(s, ev);
-    const ans = prompt(`열 테이블 번호 (범위 ${ev.tableStart || 1}~${ev.tableEnd || '제한 없음'}, 비우면 자동 ${next ? 'T' + next : '없음'})`, '');
-    if (ans === null) return;
+    const ans = await promptBox(`열 테이블 번호 (범위 ${ev.tableStart || 1}~${ev.tableEnd || '제한 없음'}, 비우면 자동 ${next ? 'T' + next : '없음'})`, '', '테이블 열기');
+    if (ans == null) return;
     let r; Store.commit('새 테이블 오픈', st => { r = L.openTable(st, eventId, { number: +ans || 0 }); if (r.error) return false; });
     if (r.error) toast(r.error); else toast(`T${r.number} 오픈${dealerNote(r)} (되돌리기 가능)`);
   }
@@ -200,17 +224,16 @@ const App = (() => {
       ui.regForm = { name: p.name, phone: p.phone || '', buyIn: '', memo: '리엔트리' }; ui.regSeat = null; render();
       const n = $('#regForm input[name=name]'); if (n) n.focus(); toast('폼에 채웠습니다. 등록 버튼을 누르세요');
     } });
-    actions.push({ label: '등록 취소 (삭제)', cls: 'danger', fn: () => {
-      if (confirm(`#${p.entryNo} ${p.name} 등록을 취소(삭제)할까요?`)) { Store.commit('등록 취소: ' + p.name, st => L.cancelRegistration(st, p.id)); toast('등록 취소됨 (되돌리기 가능)'); }
+    actions.push({ label: '등록 취소 (삭제)', cls: 'danger', fn: async () => {
+      if (await confirmBox(`#${p.entryNo} ${p.name} 등록을 취소(삭제)할까요?`, '등록 취소', true)) { Store.commit('등록 취소: ' + p.name, st => L.cancelRegistration(st, p.id)); toast('등록 취소됨 (되돌리기 가능)'); }
     } });
     sheet(`#${p.entryNo} ${p.name} · ${seatLabel(s, p)}`, actions, `<div class="muted small" style="margin-bottom:10px">${p.phone ? h(p.phone) + ' · ' : ''}${p.memo ? h(p.memo) + ' · ' : ''}${Print.fmtTime(p.registeredAt)} 등록</div>`);
   }
-  function editPlayer(pid) {
+  async function editPlayer(pid) {
     const p = L.playerOf(S(), pid); if (!p) return;
-    const name = prompt('이름', p.name); if (name === null) return;
-    const phone = prompt('연락처', p.phone || ''); if (phone === null) return;
-    const memo = prompt('메모', p.memo || ''); if (memo === null) return;
-    Store.commit('정보 수정: ' + p.name, st => { const x = L.playerOf(st, pid); x.name = name.trim() || x.name; x.phone = phone.trim(); x.memo = memo.trim(); });
+    const v = await ask({ title: `#${p.entryNo} 정보 수정`, ok: '저장', fields: [{ name: 'name', label: '이름', value: p.name }, { name: 'phone', label: '연락처', value: p.phone || '', type: 'tel' }, { name: 'memo', label: '메모', value: p.memo || '' }] });
+    if (!v) return;
+    Store.commit('정보 수정: ' + p.name, st => { const x = L.playerOf(st, pid); x.name = v.name.trim() || x.name; x.phone = v.phone.trim(); x.memo = v.memo.trim(); });
     toast('저장됨');
   }
   function printConfirm(playerId) {
@@ -400,9 +423,9 @@ const App = (() => {
       { label: '바우처 발행 + 인쇄', cls: 'primary', fn: () => issueAndPrint(pid, prize) },
     ], '<div class="muted small" style="margin-bottom:10px">입상자입니다. 지금 바우처를 발행하거나, 현황 탭 순위표에서 나중에 발행할 수 있습니다.</div>'), 100);
   }
-  function doCloseTable(tid) {
+  async function doCloseTable(tid) {
     const s = S(); const t = L.tableOf(s, tid); const n = L.tablePlayers(s, tid).length;
-    if (!confirm(`T${t.number} 브레이크: ${n}명을 다른 테이블 빈 좌석에 무작위 배치하고 테이블을 닫습니다. 진행할까요?\n(상단 되돌리기로 취소할 수 있습니다)`)) return;
+    if (!await confirmBox(`T${t.number} 브레이크: ${n}명을 다른 테이블 빈 좌석에 무작위 배치하고 테이블을 닫습니다. 진행할까요?\n(상단 되돌리기로 취소할 수 있습니다)`, '브레이크')) return;
     let r; Store.commit(`T${t.number} 브레이크`, st => { r = L.closeTable(st, tid); if (r.error) return false; });
     if (r.error) { toast(r.error); return; }
     showMoves(`T${t.number} 브레이크 완료`, r.moves);
@@ -425,9 +448,9 @@ const App = (() => {
     Print.print(Print.moveHtml(tpl, { event: curEvent(), moves: moves.map(m => Object.assign({}, m, { fromNumber: num(m.from.tableId), toNumber: num(m.to.tableId) })) }), tpl.paper);
   }
   /** 오픈 밸런싱: 새 테이블을 열고 자동 밸런싱으로 전체 편차를 1 이하로 */
-  function doOpenBalance(eventId) {
+  async function doOpenBalance(eventId) {
     const s = S(); const ev = L.eventOf(s, eventId); const next = L.nextTableNumber(s, ev);
-    const ans = prompt(`새로 열 테이블 번호 (비우면 자동 ${next ? 'T' + next : '없음'})`, ''); if (ans === null) return;
+    const ans = await promptBox(`새로 열 테이블 번호 (비우면 자동 ${next ? 'T' + next : '없음'})`, '', '열고 밸런싱'); if (ans == null) return;
     let r, moves = [];
     Store.commit('새 테이블 + 밸런싱', st => {
       r = L.openTable(st, eventId, { number: +ans || 0 }); if (r.error) return false;
@@ -578,9 +601,9 @@ const App = (() => {
     $$('[data-issue]', root).forEach(b => b.addEventListener('click', () => issueAndPrint(b.dataset.issue, +b.dataset.amt)));
     $$('[data-revoucher]', root).forEach(b => b.addEventListener('click', () => printVoucher(b.dataset.revoucher)));
     $$('[data-unbust]', root).forEach(b => b.addEventListener('click', () => doUnbust(b.dataset.unbust)));
-    const fin = $('#btnFinish', root); if (fin) fin.addEventListener('click', () => {
+    const fin = $('#btnFinish', root); if (fin) fin.addEventListener('click', async () => {
       const ev = curEvent(); const w = L.activePlayers(S(), ev.id)[0];
-      if (!confirm(`${w.name}을(를) 1위로 확정하고 "${ev.name}"을(를) 종료할까요?`)) return;
+      if (!await confirmBox(`${w.name}을(를) 1위로 확정하고 "${ev.name}"을(를) 종료할까요?`, '우승 확정')) return;
       Store.commit('이벤트 종료: ' + ev.name, st => { const x = L.playerOf(st, w.id); x.status = 'busted'; x.finishRank = 1; x.bustedAt = Date.now(); x.lastSeat = { tableId: x.tableId, seat: x.seat }; x.tableId = null; x.seat = null; L.eventOf(st, ev.id).status = 'closed'; });
       ui.eventSection = 'ranks'; render(); toast('이벤트 종료 · 순위표를 확인하세요');
     });
@@ -603,9 +626,9 @@ const App = (() => {
     bindRows();
     $('#btnAddPayout', form).addEventListener('click', () => { const rows = readPayoutRows(form); const last = rows[rows.length - 1]; const next = last ? (+last.to || +last.from || 0) + 1 : 1; rows.push({ from: next, to: next, amount: '', label: '' }); rerows(rows); });
     const cancel = $('#btnCancelEvent', root); if (cancel) cancel.addEventListener('click', () => { ui.eventEdit = null; render(); });
-    const del = $('#btnDeleteEvent', root); if (del) del.addEventListener('click', () => {
+    const del = $('#btnDeleteEvent', root); if (del) del.addEventListener('click', async () => {
       const ev = L.eventOf(S(), editId); const n = L.eventPlayers(S(), ev.id).length;
-      if (!confirm(`"${ev.name}" 이벤트와 참가자 ${n}명, 테이블 정보를 모두 삭제할까요?\n(되돌리기 가능)`)) return;
+      if (!await confirmBox(`"${ev.name}" 이벤트와 참가자 ${n}명, 테이블 정보를 모두 삭제할까요?\n(되돌리기 가능)`, '삭제', true)) return;
       Store.commit('이벤트 삭제: ' + ev.name, st => L.deleteEvent(st, ev.id)); ui.eventEdit = null; toast('이벤트 삭제됨'); location.hash = '#home';
     });
   }
@@ -680,7 +703,7 @@ const App = (() => {
         printVoucher(v.id);
       });
       $$('[data-revoucher]', root).forEach(b => b.addEventListener('click', () => printVoucher(b.dataset.revoucher)));
-      $$('[data-delvoucher]', root).forEach(b => b.addEventListener('click', () => { if (confirm('이 바우처 발행 기록을 취소할까요?')) Store.commit('바우처 취소', st => { st.vouchers = st.vouchers.filter(v => v.id !== b.dataset.delvoucher); }); }));
+      $$('[data-delvoucher]', root).forEach(b => b.addEventListener('click', async () => { if (await confirmBox('이 바우처 발행 기록을 취소할까요?', '발행 취소', true)) Store.commit('바우처 취소', st => { st.vouchers = st.vouchers.filter(v => v.id !== b.dataset.delvoucher); }); }));
     }
   }
   function printVoucher(id) {
@@ -802,6 +825,7 @@ const App = (() => {
   /** 0.5초마다: 시간이 다 된 레벨 넘기기(모든 이벤트) + 화면의 시계 숫자 갱신 */
   function tick() {
     const s = S();
+    if (F.gate() === 'boot' && !ui.ddFail && Date.now() - ui.bootAt > 6000) { ui.ddFail = true; render(); }
     const due = s.events.filter(e => e.clock && e.clock.running && F.remain(e.clock) <= 0);
     if (due.length) {
       let curChanged = false;
@@ -838,6 +862,8 @@ const App = (() => {
     const prev = new Map(livePrev.map(t => [t.no, t.dealer]));
     l.tables.forEach(t => { if (t.dealer && !prev.has(t.no) && s.tables.some(x => x.status === 'open' && x.number === t.no)) toast(`T${t.no} 딜러 ${t.dealer} 자동 배치`, 2500); });
     livePrev = l.tables.slice();
+    const gate = F.gate();
+    if (gate !== ui.gate) { ui.gate = gate; render(); if (gate === 'ok' && ui.gateWas === 'login') toast('로그인됨 · ' + (l.href ? '이벤트를 이어서 엽니다' : 'DD 에서 오늘 이벤트를 고르세요'), 3000); ui.gateWas = gate; return; }
     const sig = l.page + '|' + JSON.stringify(l.tables) + '|' + (l.event && l.event.name);
     if (sig !== liveSig) { liveSig = sig; if (['tables', 'dealers', 'settings'].includes(ui.tab)) render(); }
     paintClock();
@@ -1004,7 +1030,7 @@ const App = (() => {
         r.onload = () => { try { Store.importJSON(r.result); toast('가져오기 완료'); } catch (err) { toast('가져오기 실패: ' + err.message); } };
         r.readAsText(f);
       });
-      $('#btnReset', root).addEventListener('click', () => { if (confirm('모든 이벤트/참가자/테이블/바우처를 삭제합니다. 계속할까요?') && confirm('정말로 초기화할까요? (되돌리기 1회 가능)')) { Store.reset(); toast('초기화됨'); location.hash = '#home'; } });
+      $('#btnReset', root).addEventListener('click', async () => { if (await confirmBox('모든 이벤트/참가자/테이블/바우처를 삭제합니다. 계속할까요?', '계속', true) && await confirmBox('정말로 초기화할까요? (되돌리기 1회 가능)', '초기화', true)) { Store.reset(); toast('초기화됨'); location.hash = '#home'; } });
     }
   }
 
@@ -1028,7 +1054,7 @@ const App = (() => {
     const editLv = (label, fn) => Store.commit(label, st => { const e = L.eventOf(st, evId); F.ensure(e); return fn(e); });
     $('#lvAdd', root).addEventListener('click', () => editLv('레벨 추가', e => { const last = e.levels.slice().reverse().find(l => !l.brk) || { sb: 100, bb: 200, ante: 200, min: 20 }; e.levels.push({ sb: last.sb * 2, bb: last.bb * 2, ante: last.ante * 2, min: last.min }); }));
     $('#brkAdd', root).addEventListener('click', () => editLv('브레이크 추가', e => { e.levels.push({ brk: true, min: 10 }); }));
-    $('#lvDefault', root).addEventListener('click', () => { if (confirm('블라인드 구조를 기본값(20분 레벨, 10분 브레이크)으로 바꿀까요?')) editLv('블라인드 기본 구조', e => { e.levels = F.defaultLevels(); e.clock.idx = Math.min(e.clock.idx, e.levels.length - 1); }); });
+    $('#lvDefault', root).addEventListener('click', async () => { if (await confirmBox('블라인드 구조를 기본값(20분 레벨, 10분 브레이크)으로 바꿀까요?', '기본값으로')) editLv('블라인드 기본 구조', e => { e.levels = F.defaultLevels(); e.clock.idx = Math.min(e.clock.idx, e.levels.length - 1); }); });
     $$('[data-dellv]', root).forEach(b => b.addEventListener('click', () => editLv('레벨 삭제', e => {
       if (e.levels.length <= 1) return false; const i = +b.dataset.dellv; e.levels.splice(i, 1);
       if (e.clock.idx > i) e.clock.idx--; if (e.clock.idx >= e.levels.length) F.setLevel(e, e.levels.length - 1);
@@ -1049,21 +1075,66 @@ const App = (() => {
     const tb = $('#topbar'); if (!tb) return;
     document.documentElement.style.setProperty('--topbarH', tb.offsetHeight + 'px');
   }
+  /** 앱 문(로그인 전): 승인된 DD 계정으로 로그인해야만 쓸 수 있다. 링크를 열자마자 DD 로그인 화면(iframe)이 뜨고, 로그인하면 이벤트 목록으로 */
+  function gateHtml(g) {
+    if (g === 'boot') return ui.ddFail
+      ? `<div class="banner warn gate-line"><span class="grow">딜러 디렉터를 불러오지 못했습니다. 인터넷 연결을 확인하고 새로 고쳐 주세요.</span><button class="sm" onclick="location.reload()">새로 고침</button></div>`
+      : `<div class="gate-line muted small">계정을 확인하는 중입니다.</div>`;
+    if (g === 'blocked') return `<div class="gate-line muted small">계정 상태를 확인해 주세요. 아래 안내대로 다시 로그인하거나 판매자에게 문의하세요.</div>`;
+    return `<div class="gate-line muted small">승인된 계정으로 로그인하면 이벤트 목록이 열립니다.</div>`;
+  }
   function render() {
     renderTop();
     if (ui.tab !== 'home' && !curEvent()) ui.tab = 'home';
+    const gate = F.gate();
     document.body.classList.toggle('at-home', ui.tab === 'home');
+    document.body.classList.toggle('at-gate', gate !== 'ok');
     document.body.classList.toggle('at-dealers', ui.tab === 'dealers');
-    $('#ddFrame').hidden = ui.tab !== 'dealers';
+    $('#ddFrame').hidden = !(ui.tab === 'dealers' || gate !== 'ok');
+    const root = $('#view');
+    if (gate !== 'ok') { root.innerHTML = gateHtml(gate); $$('#tabbar a').forEach(a => a.classList.remove('active')); syncTopbarHeight(); return; }
     const v = VIEWS[ui.tab] || VIEWS.home;
-    const root = $('#view'); root.innerHTML = v[0](); v[1](root);
+    root.innerHTML = v[0](); v[1](root);
     $$('#tabbar a').forEach(a => a.classList.toggle('active', a.dataset.tab === ui.tab));
     if (!$('#board').classList.contains('hidden')) { $('#board').innerHTML = boardHtml(); $('#bdClose').addEventListener('click', closeBoard); }
     paintClock();
     syncTopbarHeight();
   }
+  /* ---------- 새 버전 알림 ----------
+     빌드가 없으므로 버전 번호 대신 배포된 파일의 ETag/Last-Modified 를 HEAD 요청으로 2분마다(탭을 다시 볼 때도) 비교한다.
+     하나라도 바뀌면 "업데이트가 있습니다. 새로고침을 눌러주세요" 토스트(#updateToast)를 누를 때까지 띄운다 (2026-10-13 사용자 요청).
+     file:// 나 HEAD 를 안 받는 서버에서는 도장이 안 찍혀 조용히 아무것도 하지 않는다. */
+  const UPDATE_FILES = ['index.html', 'css/app.css', 'js/store.js', 'js/logic.js', 'js/floor.js', 'js/print.js', 'js/app.js', 'dd/index.html', 'dd/js/app.js', 'dd/js/engine.js', 'dd/js/phoneview.js', 'dd/css/td-theme.css'];
+  async function fileStamps() {
+    const out = {};
+    await Promise.all(UPDATE_FILES.map(async f => {
+      try {
+        const r = await fetch(f, { method: 'HEAD', cache: 'no-store' }); if (!r.ok) return;
+        const st = r.headers.get('etag') || r.headers.get('last-modified'); if (st) out[f] = st;
+      } catch (e) { /* 오프라인·file:// */ }
+    }));
+    return out;
+  }
+  function watchUpdates() {
+    if (!/^https?:$/.test(location.protocol)) return;
+    let base = null, found = false;
+    const check = async () => {
+      if (found || document.hidden) return;
+      const now = await fileStamps();
+      if (!base) { base = now; return; }
+      const changed = Object.keys(base).filter(f => now[f] && now[f] !== base[f]);
+      if (!changed.length) return;
+      found = true; $('#updateToast').hidden = false;
+    };
+    $('#btnReloadApp').addEventListener('click', () => location.reload());
+    setTimeout(check, 3000);
+    setInterval(check, 120000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+  }
+
   function init() {
     Store.subscribe(render);
+    watchUpdates();
     window.addEventListener('hashchange', () => { ui.tab = (location.hash || '#home').slice(1); ui.moveMode = null; render(); });
     $('#eventSelect').addEventListener('change', (e) => { Store.patch(st => st.selectedEventId = e.target.value || null); ui.regSeat = null; ui.moveMode = null; });
     $('#btnUndo').addEventListener('click', () => { const l = Store.undo(); if (l) toast('되돌림: ' + l); });
@@ -1075,7 +1146,8 @@ const App = (() => {
     window.addEventListener('resize', syncTopbarHeight);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#board').classList.contains('hidden')) closeBoard(); });
     setInterval(tick, 500);
-    $('#ddFrame').src = F.frameSrc(S()); // DD 는 탭과 무관하게 항상 떠 있다 (교대 시계·휴대폰 공유)
+    ui.bootAt = Date.now(); ui.gate = 'boot'; ui.gateWas = 'boot';
+    $('#ddFrame').src = F.frameSrc(S()); // DD 는 탭과 무관하게 항상 떠 있다 (교대 시계·휴대폰 공유). 로그인 전에는 앱 문 역할
     F.onLive(onDdLive);
     if (!S().selectedEventId && S().events.length) Store.patch(st => st.selectedEventId = st.events[0].id);
     render();

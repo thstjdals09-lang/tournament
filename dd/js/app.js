@@ -2945,7 +2945,10 @@
     let lastSig = '';
     const page = needLogin ? 'login' : needFetch ? 'fetch' : isAdminView ? 'admin' : isList ? 'list' : (isBoard || isMe) ? 'view' : 'event';
     function report() {
-      if (page !== 'event') { post({ type: 'page', page, href: location.search }); return; }
+      if (page !== 'event') { // 로그인·목록 화면: 부모는 이것으로 '로그인 전'을 알고 앱 전체를 막는다 (승인된 DD 계정만 사용)
+        const pm = { type: 'page', page, href: location.search, blocked };
+        const psig = JSON.stringify(pm); if (psig === lastSig) return; lastSig = psig; post(pm); return;
+      }
       const now = nowMs();
       const tables = E.activeTables(state).map(t => {
         const d = t.dealerId ? E.dealerOf(state, t.dealerId) : null;
@@ -2984,6 +2987,9 @@
       else if (m.type === 'share' && page === 'event') $('btnShare').click();
       else if (m.type === 'hello') report();
     });
+    // 계정 차단(다른 PC 로그인·기간 만료·정지)이 뜨면 부모에게 바로 알린다 — renderGate 는 render 를 거치지 않으므로
+    const renderGate0 = renderGate;
+    renderGate = function () { renderGate0(); report(); };
     return { report };
   })();
 
@@ -3003,6 +3009,7 @@
     const f = $('formLogin').elements;
     f.email.value = loadJson(EMAIL_KEY) || '';
     (f.email.value ? f.password : f.email).focus();
+    if (td) td.report(); // Holdem TD 다리: '로그인 전'을 부모에게 (앱 문)
     return;
   }
 
@@ -3015,6 +3022,7 @@
     const back = `<a class="btn" href="${esc(homeUrl())}">이벤트 목록</a>`;
     g.innerHTML = '<div class="gate-box"><h2>이벤트를 불러오는 중…</h2></div>';
     g.hidden = false;
+    if (td) td.report(); // Holdem TD 다리
     fetchEvent(wantEvent).then(ok => {
       if (blocked) return;
       if (ok) location.reload();

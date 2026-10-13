@@ -59,7 +59,7 @@ const Floor = (() => {
   /* ---------- 딜러: dealer-director(DD) 앱을 iframe(#ddFrame, dd/index.html)으로 통째로 띄우고 postMessage 로 잇는다 ----------
      TD → DD: {td:'dd', type:'tables', open:[번호…]}  Store.commit 마다 열린 테이블 번호 전부 → DD 가 없는 번호는 열고(쉬는 딜러 자동 배치), 사라진 번호는 깬다
      DD → TD: {dd:'td', type:'state', tables:[{no, dealer, since, feature}], staffing, clock, event, href}  그릴 때마다(바뀐 것만)
-              {dd:'td', type:'page', page:'login'|'list'|…}  이벤트가 열려 있지 않을 때
+              {dd:'td', type:'page', page:'login'|'list'|…, blocked}  이벤트가 열려 있지 않을 때 (login 이면 앱 전체를 막는다 → gate)
      DD 상태는 DD 가 자기 저장소(dealer-director:…)에 들고 있다. 여기 live 는 화면 표시용 사본일 뿐 TD state 에 저장하지 않는다. */
   const live = { page: null, event: null, tables: [], staffing: null, clock: null, dealers: 0, href: '', room: null, at: 0 };
   const listeners = [];
@@ -73,7 +73,7 @@ const Floor = (() => {
     const m = e.data; if (!m || m.dd !== 'td') return;
     if (ddOrigin() !== '*' && e.origin !== ddOrigin()) return;
     if (m.type === 'ready' || m.type === 'hello') { if (typeof Store !== 'undefined') sync(Store.get()); return; }
-    if (m.type === 'page') { Object.assign(live, { page: m.page, href: m.href || '', event: null, tables: [], staffing: null, clock: null, at: Date.now() }); }
+    if (m.type === 'page') { Object.assign(live, { page: m.page, href: m.href || '', event: null, tables: [], staffing: null, clock: null, blocked: m.blocked || null, at: Date.now() }); }
     else if (m.type === 'state') { Object.assign(live, { page: m.page, href: m.href || '', event: m.event, tables: m.tables || [], staffing: m.staffing, clock: m.clock, dealers: m.dealers || 0, room: m.room, blocked: m.blocked, at: Date.now() }); if (typeof Store !== 'undefined') sync(Store.get()); }
     else return;
     listeners.forEach(fn => fn(live));
@@ -87,6 +87,9 @@ const Floor = (() => {
     return dt && dt.dealer ? { name: dt.dealer, since: dt.since } : null;
   }
   const ddReady = () => live.page === 'event';
+  /** 앱 문: 승인된 DD 계정으로 로그인해야 앱 전체를 쓸 수 있다 (2026-10-13 사용자 요청).
+      'boot'(DD 가 아직 보고 전) · 'login'(로그인 화면) · 'blocked'(다른 PC 로그인·기간 만료·정지 — DD 가 자기 화면에 이유를 띄운다) · 'ok' */
+  const gate = () => (!live.page ? 'boot' : live.page === 'login' ? 'login' : live.blocked ? 'blocked' : 'ok');
   const nextPushIn = () => (live.clock && live.clock.running && live.clock.nextPushAt != null) ? live.clock.nextPushAt - (Date.now() + (live.clock.offset || 0)) : null;
   const openSettings = () => post({ type: 'settings' });
   const openShare = () => post({ type: 'share' });
@@ -94,5 +97,5 @@ const Floor = (() => {
   const frameSrc = (s) => 'dd/index.html' + ((s.settings && s.settings.ddHref) || '');
 
   return { defaultLevels, levels, clockOf, ensure, remain, levelNo, levelLabel, blindText, mmss, currentBB, breakIn, lateRegOpen, start, pause, setLevel, addTime, advance,
-    live, onLive, sync, dealerAt, ddReady, nextPushIn, openSettings, openShare, frameSrc, post };
+    live, onLive, sync, dealerAt, ddReady, gate, nextPushIn, openSettings, openShare, frameSrc, post };
 })();
