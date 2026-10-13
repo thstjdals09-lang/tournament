@@ -14,7 +14,7 @@ const App = (() => {
   const money = Print.fmtMoney;
 
   const ui = {
-    tab: (location.hash || '#reg').slice(1),
+    tab: (location.hash || '#home').slice(1),
     regForm: { name: '', phone: '', buyIn: '', memo: '' },
     regSeat: null, regSearch: '',
     moveMode: null,           // { playerId }
@@ -46,10 +46,17 @@ const App = (() => {
     if (onBind) onBind(el);
   }
   function closeSheet() { const el = $('#sheet'); el.classList.add('hidden'); el.innerHTML = ''; }
+  /** 테이블 오픈 안내 뒤에 붙는 자동 배치 딜러 문구 */
+  const dealerNote = (t) => { const d = Floor.dealerAt(S(), t.id); return d ? ' · 딜러 ' + d.name : (Floor.dealers(S()).length ? ' · 쉬는 딜러 없음' : ''); };
   const tableName = (s, id) => { const t = L.tableOf(s, id); return t ? 'T' + t.number : '-'; };
   const seatLabel = (s, p) => p.status === 'active' ? `${tableName(s, p.tableId)} S${p.seat}` : `탈락 ${p.finishRank}위`;
   function noEventHtml() { return `<div class="card"><h2>이벤트가 없습니다</h2><p class="muted">먼저 이벤트를 만들어야 등록과 테이블 관리를 할 수 있습니다.</p><button class="primary" id="btnGoEvents">이벤트 만들기</button></div>`; }
-  function bindNoEvent(root) { const b = $('#btnGoEvents', root); if (b) b.addEventListener('click', () => { ui.eventEdit = 'new'; location.hash = '#events'; }); }
+  function bindNoEvent(root) { const b = $('#btnGoEvents', root); if (b) b.addEventListener('click', () => { ui.eventEdit = 'new'; location.hash = '#home'; }); }
+  /** 이벤트 목록에서 들어가기: 그 이벤트를 선택하고 등록 탭으로 */
+  function enterEvent(id) {
+    Store.patch(st => st.selectedEventId = id); ui.regSeat = null; ui.moveMode = null; ui.eventEdit = null;
+    if (location.hash === '#reg') render(); else location.hash = '#reg';
+  }
 
   /* ---------- 상단 바 ---------- */
   function renderTop() {
@@ -82,7 +89,7 @@ const App = (() => {
     const ans = prompt(`열 테이블 번호 (범위 ${ev.tableStart || 1}~${ev.tableEnd || '제한 없음'}, 비우면 자동 ${next ? 'T' + next : '없음'})`, '');
     if (ans === null) return;
     let r; Store.commit('새 테이블 오픈', st => { r = L.openTable(st, eventId, { number: +ans || 0 }); if (r.error) return false; });
-    if (r.error) toast(r.error); else toast(`T${r.number} 오픈 (되돌리기 가능)`);
+    if (r.error) toast(r.error); else toast(`T${r.number} 오픈${dealerNote(r)} (되돌리기 가능)`);
   }
 
   /* ---------- 등록 탭 ---------- */
@@ -179,7 +186,7 @@ const App = (() => {
       Store.commit('등록: ' + data.name, st => { res = L.register(st, ev.id, data, ui.regSeat); if (res.error) return false; });
       if (res.error) { toast(res.error); return; }
       const p = res.player; const st = S();
-      toast(`#${p.entryNo} ${p.name} → ${tableName(st, p.tableId)} S${p.seat}${res.openedTable ? ' (새 테이블 오픈)' : ''}`);
+      toast(`#${p.entryNo} ${p.name} → ${tableName(st, p.tableId)} S${p.seat}${res.openedTable ? ` (새 테이블 T${res.openedTable.number} 오픈${dealerNote(res.openedTable)})` : ''}`, 3500);
       ui.regForm = { name: '', phone: '', buyIn: '', memo: '' }; ui.regSeat = null; ui.seatPick = false;
       render();
       if (printFlag && st.settings.autoPrintOnRegister !== false) printConfirm(p.id);
@@ -503,10 +510,11 @@ const App = (() => {
     const list = s.events.map(e => {
       const all = L.eventPlayers(s, e.id), act = all.filter(p => p.status === 'active');
       return `<div class="list-item ${e.id === s.selectedEventId ? 'current' : ''}">
-        <div class="grow" data-selevent="${e.id}" style="cursor:pointer"><div class="t">${h(e.name)} ${e.status === 'closed' ? '<span class="chip">종료</span>' : ''}</div>
+        <div class="grow" data-enter="${e.id}" style="cursor:pointer"><div class="t">${h(e.name)} ${e.status === 'closed' ? '<span class="chip">종료</span>' : ''}</div>
         <div class="s">바이인 ${money(e.buyIn)}원 · ${e.seats}인 · 테이블 T${e.tableStart || 1}~${e.tableEnd || '∞'} · 참가 ${all.length} / 남은 ${act.length} / 오픈 ${L.openTables(s, e.id).length}</div></div>
-        <button class="sm ghost" data-editevent="${e.id}">수정</button></div>`;
+        <button class="sm ghost" data-editevent="${e.id}">수정</button><button class="sm primary" data-enter="${e.id}">들어가기</button></div>`;
     }).join('');
+    if (ui.tab === 'home' && !s.events.length && !ui.eventEdit) ui.eventEdit = 'new';
     const ed = ui.eventEdit ? (ui.eventEdit === 'new' ? { name: '', buyIn: '', seats: s.settings.defaultSeats, startChips: '', memo: '', status: 'open', rakePct: 0, prizePool: '', payouts: [], tableStart: 1, tableEnd: '' } : L.eventOf(s, ui.eventEdit)) : null;
     const editForm = ed ? `<div class="card"><h3>${ui.eventEdit === 'new' ? '새 이벤트' : '이벤트 수정'}</h3>
       <form id="eventForm">
@@ -570,15 +578,16 @@ const App = (() => {
         }).join('') || '<div class="muted small">아직 탈락자가 없습니다.</div>'}</div>
         ${active.length > 1 ? `<p class="muted small" style="margin-top:8px">남은 ${active.length}명은 테이블 탭에서 탈락 처리하면 여기에 순위가 쌓입니다.</p>` : ''}`;
       }
-      dash = `<div class="card"><div class="row tight" style="margin-bottom:10px"><h2 style="margin:0">${h(ev.name)}</h2><span style="flex:1"></span>${secs.map(([k, lb]) => `<button class="sm ${ui.eventSection === k ? 'primary' : 'ghost'}" data-esec="${k}">${lb}</button>`).join('')}</div>${body}</div>`;
+      dash = `<div class="card"><div class="row tight" style="margin-bottom:10px"><h2 style="margin:0">${h(ev.name)}</h2><span style="flex:1"></span>${secs.map(([k, lb]) => `<button class="sm ${ui.eventSection === k ? 'primary' : 'ghost'}" data-esec="${k}">${lb}</button>`).join('')}<button class="sm ghost" data-editevent="${ev.id}">이벤트 수정</button></div>${body}</div>`;
     }
-    return `${dash}${editForm}
-    <div class="card"><div class="row tight"><h3 style="margin:0">이벤트 목록</h3><span style="flex:1"></span><button class="primary sm" id="btnNewEvent">새 이벤트</button></div>
-      <div class="list" style="margin-top:10px">${list || '<div class="muted">이벤트가 없습니다. 새 이벤트를 만들어 시작하세요.</div>'}</div></div>`;
+    if (ui.tab !== 'home') return editForm || dash;
+    return `${editForm}
+    <div class="card"><div class="row tight"><h2 style="margin:0">이벤트</h2><span class="muted small">들어가면 그 이벤트의 등록·테이블·클락·딜러를 관리합니다</span><span style="flex:1"></span><button class="primary" id="btnNewEvent">새 이벤트 만들기</button></div>
+      <div class="list" style="margin-top:12px">${list || '<div class="muted">이벤트가 없습니다. 새 이벤트를 만들어 시작하세요.</div>'}</div></div>`;
   }
   function bindEvents(root) {
-    $('#btnNewEvent', root).addEventListener('click', () => { ui.eventEdit = 'new'; render(); setTimeout(() => { const i = $('#eventForm input[name=name]'); if (i) i.focus(); }, 0); });
-    $$('[data-selevent]', root).forEach(el => el.addEventListener('click', () => { Store.patch(st => st.selectedEventId = el.dataset.selevent); ui.regSeat = null; ui.moveMode = null; }));
+    const nb = $('#btnNewEvent', root); if (nb) nb.addEventListener('click', () => { ui.eventEdit = 'new'; render(); setTimeout(() => { const i = $('#eventForm input[name=name]'); if (i) i.focus(); }, 0); });
+    $$('[data-enter]', root).forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); enterEvent(el.dataset.enter); }));
     $$('[data-editevent]', root).forEach(b => b.addEventListener('click', () => { ui.eventEdit = b.dataset.editevent; render(); }));
     $$('[data-esec]', root).forEach(b => b.addEventListener('click', () => { ui.eventSection = b.dataset.esec; render(); }));
     $$('[data-issue]', root).forEach(b => b.addEventListener('click', () => issueAndPrint(b.dataset.issue, +b.dataset.amt)));
@@ -597,7 +606,7 @@ const App = (() => {
       data.payouts = L.normalizePayouts(readPayoutRows(form));
       data.rakePct = +data.rakePct || 0; data.prizePool = +data.prizePool || 0;
       if (data.tableEnd && +data.tableEnd < +data.tableStart) { toast('테이블 끝 번호가 시작 번호보다 작습니다'); return; }
-      if (ui.eventEdit === 'new') { let ev; Store.commit('이벤트 생성: ' + data.name, st => { ev = L.createEvent(st, data); st.selectedEventId = ev.id; }); toast('이벤트 생성됨'); }
+      if (ui.eventEdit === 'new') { let ev; Store.commit('이벤트 생성: ' + data.name, st => { ev = L.createEvent(st, data); st.selectedEventId = ev.id; }); ui.eventEdit = null; toast('이벤트를 만들었습니다. 등록을 시작하세요'); enterEvent(ev.id); return; }
       else { Store.commit('이벤트 수정', st => L.updateEvent(st, ui.eventEdit, data)); toast('저장됨'); }
       ui.eventEdit = null; render();
     });
@@ -894,6 +903,7 @@ const App = (() => {
         <button class="primary" id="btnPush">지금 푸시</button>
         <span class="muted">다음 푸시 <b data-clk="push"></b></span>
         <label class="chk">주기 <input type="number" min="5" step="5" id="pushMin" value="${c.pushMin}" style="width:70px;padding:5px 8px">분</label>
+        <label class="chk"><input type="checkbox" id="autoDealer" ${c.autoAssign !== false ? 'checked' : ''}>테이블이 열리면 쉬는 딜러 자동 배치</label>
       </div>
       <p class="muted small" style="margin:8px 0 0">푸시하면 가장 오래 쉰 딜러가 가장 낮은 번호 테이블로 들어가고, 앉아 있던 딜러는 다음 번호 테이블로 한 칸씩 이동합니다. 테이블보다 많은 딜러는 휴식으로 빠집니다.</p>
     </div>
@@ -923,6 +933,7 @@ const App = (() => {
         `<div class="list" style="margin-bottom:12px">${moves.map(m => `<div class="list-item"><div class="grow"><div class="t">${h(m.dealer.name)}</div><div class="s">${m.to ? '→ <b>T' + m.to.number + '</b>' : '→ 휴식'}</div></div></div>`).join('')}</div>`);
       void s;
     });
+    $('#autoDealer', root).addEventListener('change', (e) => Store.patch(st => { F.cfg(st).autoAssign = e.target.checked; }));
     $('#pushMin', root).addEventListener('change', (e) => Store.patch(st => { F.cfg(st).pushMin = Math.max(1, +e.target.value || 30); }));
     $$('[data-tdealer]', root).forEach(sel => sel.addEventListener('change', () => {
       const tid = sel.dataset.tdealer, did = sel.value;
@@ -940,7 +951,7 @@ const App = (() => {
   }
 
   /* ---------- 렌더 루프 ---------- */
-  const VIEWS = { reg: [viewReg, bindReg], tables: [viewTables, bindTables], clock: [viewClock, bindClock], dealers: [viewDealers, bindDealers], events: [viewEvents, bindEvents], print: [viewPrint, bindPrint] };
+  const VIEWS = { reg: [viewReg, bindReg], tables: [viewTables, bindTables], clock: [viewClock, bindClock], dealers: [viewDealers, bindDealers], events: [viewEvents, bindEvents], home: [viewEvents, bindEvents], print: [viewPrint, bindPrint] };
   /** 데스크톱에서 탭바를 상단바 바로 아래에 고정하기 위한 높이 측정 */
   function syncTopbarHeight() {
     const tb = $('#topbar'); if (!tb) return;
@@ -948,7 +959,9 @@ const App = (() => {
   }
   function render() {
     renderTop();
-    const v = VIEWS[ui.tab] || VIEWS.reg;
+    if (ui.tab !== 'home' && !curEvent()) ui.tab = 'home';
+    document.body.classList.toggle('at-home', ui.tab === 'home');
+    const v = VIEWS[ui.tab] || VIEWS.home;
     const root = $('#view'); root.innerHTML = v[0](); v[1](root);
     $$('#tabbar a').forEach(a => a.classList.toggle('active', a.dataset.tab === ui.tab));
     if (!$('#board').classList.contains('hidden')) { $('#board').innerHTML = boardHtml(); $('#bdClose').addEventListener('click', closeBoard); }
@@ -957,9 +970,10 @@ const App = (() => {
   }
   function init() {
     Store.subscribe(render);
-    window.addEventListener('hashchange', () => { ui.tab = (location.hash || '#reg').slice(1); ui.moveMode = null; render(); });
+    window.addEventListener('hashchange', () => { ui.tab = (location.hash || '#home').slice(1); ui.moveMode = null; render(); });
     $('#eventSelect').addEventListener('change', (e) => { Store.patch(st => st.selectedEventId = e.target.value || null); ui.regSeat = null; ui.moveMode = null; });
     $('#btnUndo').addEventListener('click', () => { const l = Store.undo(); if (l) toast('되돌림: ' + l); });
+    $('#btnHome').addEventListener('click', () => { ui.eventEdit = null; location.hash = '#home'; });
     $('#btnRedo').addEventListener('click', () => { const l = Store.redo(); if (l) toast('다시 실행: ' + l); });
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); e.shiftKey ? Store.redo() : Store.undo(); }

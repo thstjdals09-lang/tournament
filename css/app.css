@@ -142,6 +142,12 @@ main#view{padding:12px;padding-bottom:calc(var(--tabH) + 20px + env(safe-area-in
 .paper{background:#fff;color:#000;margin:0 auto;box-shadow:0 2px 12px #0008;font-family:"Noto Sans KR","Malgun Gothic",sans-serif}
 
 
+/* 이벤트 목록(첫 화면) */
+.home-btn{padding:8px 10px;font-size:13px;white-space:nowrap}
+.home-title{display:none;flex:1;font-weight:700;font-size:16px}
+body.at-home #tabbar,body.at-home #statBar,body.at-home #eventSelect,body.at-home .home-btn{display:none}
+body.at-home .home-title{display:block}
+
 /* 클락 탭 */
 .clock{text-align:center;display:grid;gap:8px;padding:20px 14px}
 .clk-level{font-size:13px;font-weight:600;letter-spacing:.08em;color:var(--muted)}

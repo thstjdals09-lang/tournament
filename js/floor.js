@@ -58,7 +58,7 @@ const Floor = (() => {
 
   /* ---------- 딜러 (현장 공통, 테이블 id 로 배정) ---------- */
   const dealers = (s) => s.dealers || (s.dealers = []);
-  const cfg = (s) => s.dealerCfg || (s.dealerCfg = { pushMin: 30, lastPush: null });
+  const cfg = (s) => s.dealerCfg || (s.dealerCfg = { pushMin: 30, lastPush: null, autoAssign: true });
   const dealerAt = (s, tableId) => (s.dealers || []).find(d => d.status === 'working' && d.tableId === tableId) || null;
   /** 현장의 모든 오픈 테이블 (이벤트 무관, 번호순) */
   const floorTables = (s) => s.tables.filter(t => t.status === 'open').sort((a, b) => a.number - b.number);
@@ -91,8 +91,18 @@ const Floor = (() => {
     cfg(s).lastPush = Date.now();
     return moves;
   }
+  /**
+   * 테이블이 열릴 때 딜러 자동 배치: 그 테이블에 딜러가 없으면 가장 오래 쉰 딜러를 앉힌다.
+   * dealer-director(DD) 의 배치 규칙으로 바꿀 때는 이 함수만 교체하면 된다.
+   */
+  function autoAssign(s, table) {
+    if (cfg(s).autoAssign === false || !table || table.status !== 'open' || dealerAt(s, table.id)) return null;
+    const d = dealers(s).filter(x => x.status === 'break').sort((a, b) => a.since - b.since)[0];
+    if (!d) return null;
+    assign(s, d, table.id); return d;
+  }
   const nextPushIn = (s) => cfg(s).lastPush ? cfg(s).lastPush + cfg(s).pushMin * 60000 - Date.now() : null;
 
   return { defaultLevels, levels, clockOf, ensure, remain, levelNo, levelLabel, blindText, mmss, currentBB, breakIn, lateRegOpen, start, pause, setLevel, addTime, advance,
-    dealers, cfg, dealerAt, floorTables, workedMs, addDealer, assign, release, releaseClosed, push, nextPushIn };
+    dealers, cfg, dealerAt, floorTables, workedMs, addDealer, assign, release, releaseClosed, push, nextPushIn, autoAssign };
 })();

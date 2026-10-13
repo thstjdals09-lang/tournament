@@ -87,7 +87,9 @@ const Logic = (() => {
     if (number) { if (usedTableNumbers(s).has(number)) return { error: 'T' + number + '은(는) 이미 사용 중입니다' }; if ((ev.disabledTables || []).includes(number)) return { error: 'T' + number + '은(는) 사용 안함으로 설정된 테이블입니다' }; }
     else { number = nextTableNumber(s, ev); if (!number) return { error: '테이블 번호 범위(' + (ev.tableStart || 1) + '~' + (ev.tableEnd || '∞') + ')에 빈 번호가 없습니다' }; }
     const t = { id: Store.uid(), eventId, number, seats: +opts.seats || ev.seats, disabledSeats: [], enabled: true, status: 'open', openedAt: Date.now() };
-    s.tables.push(t); return t;
+    s.tables.push(t);
+    if (typeof Floor !== 'undefined') Floor.autoAssign(s, t); // 열리면 딜러 자동 배치
+    return t;
   }
   /** 이벤트 공통 좌석 번호 사용/미사용 (모든 테이블에 적용) */
   function toggleEventSeat(s, eventId, seat) {
@@ -123,7 +125,7 @@ const Logic = (() => {
     t.status = 'closed'; t.closedAt = Date.now();
     return { moves };
   }
-  function reopenTable(s, tableId) { const t = tableOf(s, tableId); if (!t) return false; if (usedTableNumbers(s).has(t.number)) return { error: 'T' + t.number + ' 번호가 이미 사용 중입니다' }; t.status = 'open'; delete t.closedAt; }
+  function reopenTable(s, tableId) { const t = tableOf(s, tableId); if (!t) return false; if (usedTableNumbers(s).has(t.number)) return { error: 'T' + t.number + ' 번호가 이미 사용 중입니다' }; t.status = 'open'; delete t.closedAt; if (typeof Floor !== 'undefined') Floor.autoAssign(s, t); }
   function deleteTable(s, tableId) {
     if (tablePlayers(s, tableId).length) return { error: '플레이어가 있는 테이블은 삭제할 수 없습니다' };
     s.tables = s.tables.filter(t => t.id !== tableId);
