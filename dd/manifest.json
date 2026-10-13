@@ -1,0 +1,10 @@
+{
+  "name": "딜러 디렉터",
+  "short_name": "딜러 디렉터",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f1412",
+  "theme_color": "#0f1412",
+  "icons": [{ "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

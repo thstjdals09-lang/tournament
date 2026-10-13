@@ -4,11 +4,11 @@
 GitHub: `thstjdals09-lang/tournament` · 배포: GitHub Pages(main 브랜치 루트).
 
 ## 구조
-- `index.html` 셸: 첫 화면은 이벤트 목록(`#home`, 생성·수정·들어가기). 이벤트에 들어가면 상단바(이벤트 목록 버튼 + 이벤트 선택 + 되돌리기/다시실행 + 통계 칩)와 탭(등록/테이블/클락/딜러/현황/용지/설정), `#view`, 하단 탭바, 액션시트, `#print-root`
+- `index.html` 셸: 첫 화면은 이벤트 목록(`#home`, 생성·수정·들어가기). 이벤트에 들어가면 상단바(이벤트 목록 버튼 + 이벤트 선택 + 되돌리기/다시실행 + 통계 칩)와 탭(등록/테이블/클락/딜러/현황/용지/설정), `#view`, `#ddFrame`(딜러 탭에서만 보이는 DD iframe — `#view` 밖에 두어 탭을 옮겨도 DD 타이머가 계속 돈다), 하단 탭바, 액션시트, `#print-root`
 - `js/store.js` 상태/영속화. **모든 변경은 `Store.commit(label, fn)`** — 스냅샷을 쌓아 되돌리기 50단계. 사소한 변경(설정·템플릿·선택 이벤트)은 `Store.patch`(히스토리 없음)
 - `js/logic.js` 도메인 로직(순수 함수, state를 받아 변경). 좌석 배정·브레이크·이동·탈락·밸런싱·바우처
-- `js/floor.js` 클락(이벤트별 `levels`/`clock`/`lateRegLevel`)과 딜러 연결(`state.dd` = dealer-director 엔진 state)
-- `js/dd-engine.js` dealer-director(DD) 로테이션 엔진을 **그대로 복사**한 것. 고칠 때는 DD 저장소에서 고치고 다시 복사
+- `js/floor.js` 클락(이벤트별 `levels`/`clock`/`lateRegLevel`)과 DD 다리(`#ddFrame` iframe 에 postMessage, `Floor.live` = DD가 보내온 현재 상태)
+- `dd/` dealer-director(DD) 앱을 **통째로 복사**한 것(2026-10-13, 사용자: "그대로 가져와서 디자인만 바꿔서 쓸 거야"). 파이어베이스 로그인·이벤트·QR·휴대폰·TV·설정·백업 전부 DD 그대로. 고칠 때는 DD 저장소에서 고치고 다시 복사하되 **복사본에만 있는 두 가지는 남길 것**: `dd/js/app.js` 의 'Holdem TD 다리' 블록(`// ---------- 시작` 바로 위)과 `dd/index.html` 의 `css/td-theme.css` 링크. `dd/css/td-theme.css` 는 DD 색·글꼴을 TD 팔레트로 덮어쓰는 파일(DD 원본 style.css 는 손대지 않음)
 - `js/print.js` 참가확인증/상금바우처 HTML 렌더 + `window.print` (용지 80mm/A5/A4, `@page` 동적 주입)
 - `js/app.js` 탭별 view(HTML 문자열) + bind(이벤트). 상태 변경 시 전체 리렌더
 
@@ -20,12 +20,12 @@ GitHub: `thstjdals09-lang/tournament` · 배포: GitHub Pages(main 브랜치 루
 - 탈락: `finishRank = 탈락 시점 남은 인원`. 복구 시 이전 좌석 우선
 - 밸런싱 필요 = 오픈 테이블 max−min ≥ 2. 브레이크 가능 = 최소 테이블 제외 좌석 수 ≥ 남은 인원
 - 테이블 번호는 현장 물리 번호: 이벤트마다 `tableStart~tableEnd` 범위에서 채번하고, 다른 이벤트가 오픈 중인 번호는 건너뜀(충돌 방지). 번호 직접 지정 오픈 가능
-- **등록 탭은 등록만**(폼 + 등록자 관리). 설정은 모두 **설정 탭**(레지/테이블/클락/딜러/현황/용지)에서. 칸마다 범위 표시: '이 이벤트'(event 필드, commit) / '모든 이벤트 공통'(`s.settings`, patch, 기본값은 `Store.defaultSettings`) / 딜러는 DD 설정(`Floor.setDD`)
+- **등록 탭은 등록만**(폼 + 등록자 관리). 설정은 모두 **설정 탭**(레지/테이블/클락/딜러/현황/용지)에서. 칸마다 범위 표시: '이 이벤트'(event 필드, commit) / '모든 이벤트 공통'(`s.settings`, patch, 기본값은 `Store.defaultSettings`) / 딜러는 DD 안의 설정 창(설정 > 딜러의 버튼이 `Floor.openSettings`/`openShare` 로 DD 창을 연다)
 - 좌석 번호 사용(`event.disabledSeats`, 모든 테이블 공통)은 설정 > 테이블에서 **테이블 모양**(타원 둘레 좌석, 맨 위 딜러)으로 누른다. **테이블 사용 설정(`disabledTables`)은 2026-10-13 사용자 요청으로 없앴다** — 다시 만들지 말 것(불러올 때 지운다)
 - 자동 좌석 배정 방식 `settings.seatMode`: random(기본) / order(인원 최소 테이블 중 번호 낮은 테이블·좌석). 밸런싱 경고 기준 `balanceDiff`(자동 밸런싱은 항상 편차 1 이하까지). 레이트 레지 마감 후 등록 막기 `event.lateRegBlock`
 - 상금표는 퍼센트가 아니라 순위 구간 행 `payouts:[{from,to,amount,label}]` (예: 100~900위 30,000). `payoutFor(rank)`로 바우처 금액 자동
 - 클락: 이벤트마다 블라인드 구조와 클락을 따로 가진다. `clock = {idx, running, remain, anchor}`, 남은 시간 = remain − (now − anchor). 클락 조작(시작/정지/레벨 이동)은 `Store.patch`(되돌리기로 시간이 되감기지 않게), 구조 편집은 `commit`. 0.5초 tick 이 모든 이벤트의 끝난 레벨을 넘기고 화면의 `[data-clk]` 숫자만 갱신
-- 딜러: DD 엔진에 맡긴다(현장 공통 `state.dd`, DD 테이블 id = 't'+번호). `Store.commit`마다 `Floor.sync`가 TD의 열린 테이블 번호와 DD 열린 테이블을 맞춘다 → 테이블이 열리면 DD가 가장 오래 쉰 딜러를 자동 배치, 깨지면 그 딜러는 휴식. 교대·출퇴근·보류·지정·지금 교체는 DD 함수 그대로. 자동 교대는 0.5초 tick 에서 `Floor.pushDue`일 때 `executePush`(patch). 교대 규칙은 DD CLAUDE.md 를 따른다(앉은 딜러는 교대로 테이블을 옮기지 않음 등)
+- 딜러: **딜러 탭 = DD 앱 그대로**(`dd/index.html` iframe, DD 계정으로 로그인해 DD 이벤트를 열어 둔다. 마지막으로 연 DD 주소는 `settings.ddHref` 에 남겨 새로 고쳐도 같은 이벤트가 열린다). TD와 DD의 유일한 연결은 **테이블 열림/닫힘**: `Store.commit`마다 `Floor.sync`가 TD의 열린 테이블 번호를 `{td:'dd', type:'tables', open:[…]}` 로 보내고, DD 쪽 다리가 `E.openTable`/`E.closeTable` 로 맞춘다 → 등록으로 테이블이 열리면 DD가 가장 오래 쉰 딜러를 자동 배치, 깨지면 그 딜러는 휴식, 되돌리기도 따라간다. DD는 상태가 바뀔 때마다 `{dd:'td', type:'state', tables:[{no,dealer,since}], staffing, clock, …}` 를 돌려주고(`Floor.live`), 테이블 카드의 딜러 칩·클락 탭의 '딜러 교대' 숫자·설정 > 딜러의 요약이 그것으로 그려진다. 교대·출퇴근·보류·지정·QR·휴대폰·TV·같이 쓰기는 DD 화면에서 그대로. DD 상태는 TD 상태(`holdem-td.v1`)에 넣지 않는다(`migrate` 가 예전 `state.dd` 를 지운다). 교대 규칙은 DD CLAUDE.md 를 따른다
 - 컨바인: 닫을 테이블 여러 개 선택 → `planCombine`이 이동 계획(미리보기) → `applyCombine`. 오픈 밸런싱 = 새 테이블 오픈 + `autoBalance`. 빠른 탈락 = 테이블·좌석 번호로 찾아 탈락. 이동 결과는 1인 1장 좌석 이동 안내(`Print.moveHtml`, 참가확인증 용지) 인쇄 가능 (yajasu 참고)
 - KO: 탈락 시 아웃시킨 사람 선택(선택 사항) → `p.knockedBy`, 상대 `knockouts++`. 복구 시 되돌림
 
@@ -44,3 +44,4 @@ GitHub: `thstjdals09-lang/tournament` · 배포: GitHub Pages(main 브랜치 루
 - 2026-10-13 등록 탭은 등록만, 설정 탭 신설(레지·테이블·클락·딜러·현황·용지 세부 설정), 좌석 번호 사용을 테이블 모양으로, 테이블 사용 설정 삭제, 블라인드 구조 편집·용지 템플릿·데이터를 설정으로 이동
 - 2026-10-13 버튼 전수 점검(헤드리스 브라우저, 80여 개): 시트 안 버튼이 새 시트를 열면 닫히던 문제(`sheetSeq`), 빠른 탈락은 플레이어 있는 테이블 먼저, 초기화 후 홈으로
 - 2026-10-13 딜러 탭을 dealer-director 엔진으로 교체(테이블 오픈 시 자동 배치, 로테이션 시작/교대/일시정지, 출근·퇴근·보류·지정), 테이블 카드에 딜러 표시
+- 2026-10-13 DD 앱을 `dd/` 로 통째로 복사해 딜러 탭 iframe 으로(로그인·QR·휴대폰·TV·설정·백업 그대로), `js/dd-engine.js`·`state.dd` 삭제. TD ↔ DD 는 postMessage 다리(테이블 열림/닫힘 → DD 자동 배치, DD 상태 → 테이블 카드 딜러 칩·클락 칩). `dd/css/td-theme.css` 로 TD 팔레트

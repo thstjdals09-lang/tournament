@@ -32,8 +32,8 @@ const Store = (() => {
       defaultSeats: 9, autoOpenTable: true, balanceDiff: 2, breakHint: true, askKO: true, prizeSheet: true,
       // 클락
       levelBeep: true, warnBeforeMin: 0, boardAvg: true, boardPool: true, boardFirst: true, boardBreak: true,
-      // 딜러
-      pushBeep: true,
+      // 딜러 (DD iframe 이 마지막으로 열었던 이벤트 주소 '?e=…')
+      ddHref: '',
     };
   }
 
@@ -62,6 +62,7 @@ const Store = (() => {
   function migrate(s) {
     s.settings = Object.assign(defaultSettings(), s.settings || {});
     (s.events || []).forEach(e => { delete e.disabledTables; });
+    delete s.dd; // 예전에 TD 안에 넣어 두던 DD 엔진 상태 — 이제 DD 앱(dd/)이 자기 저장소에 둔다
     return s;
   }
 

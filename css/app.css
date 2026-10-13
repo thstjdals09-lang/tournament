@@ -220,3 +220,8 @@ body.at-home .home-title{display:block}
 .felt-seat.off{background:var(--seatOff);border:2px dashed #5b6370;color:#6b7380}
 .felt-seat.off:hover{background:var(--panel2)}
 @media (max-width:480px){.felt-seat{width:42px;height:42px}.felt-seat b{font-size:14px}.felt-seat small{display:none}}
+/* 딜러 탭: dealer-director iframe */
+.dd-frame{display:block;width:100%;border:0;background:var(--bg);height:calc(100vh - var(--topbarH,96px) - var(--tabH) - env(safe-area-inset-bottom));min-height:480px}
+body.at-dealers #view{padding-bottom:0}
+body.at-dealers .dd-note{margin:0 0 0}
+@media (min-width:900px){.dd-frame{height:calc(100vh - var(--topbarH,96px) - 44px)}}

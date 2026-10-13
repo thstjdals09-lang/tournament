@@ -1,0 +1,10 @@
+{
+  "name": "내 딜러 순서",
+  "short_name": "내 순서",
+  "start_url": "./?view=me",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f1412",
+  "theme_color": "#0f1412",
+  "icons": [{ "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

@@ -1,4 +1,4 @@
-/* 플로어 운영 로직: 토너먼트 클락(이벤트별 블라인드 구조) + 딜러 관리(현장 공통, dealer-director 엔진 연결) */
+/* 플로어 운영 로직: 토너먼트 클락(이벤트별 블라인드 구조) + 딜러 관리(dealer-director 앱을 iframe 으로 연결) */
 const Floor = (() => {
   /* ---------- 블라인드 구조 / 클락 ---------- */
   const DEF = [[100,200,200],[200,300,300],[200,400,400],[300,600,600],[400,800,800],'B',[500,1000,1000],[600,1200,1200],[800,1600,1600],[1000,2000,2000],[1200,2400,2400],'B',[1500,3000,3000],[2000,4000,4000],[2500,5000,5000],[3000,6000,6000],[4000,8000,8000],'B',[5000,10000,10000],[6000,12000,12000],[8000,16000,16000],[10000,20000,20000],[15000,30000,30000],[20000,40000,40000],[25000,50000,50000],[30000,60000,60000]];
@@ -56,54 +56,43 @@ const Floor = (() => {
     return changed;
   }
 
-  /* ---------- 딜러: dealer-director(DD) 엔진에 맡긴다 (현장 공통 state.dd) ----------
-     DD 테이블 id 는 't'+번호. Holdem TD 의 열린 테이블 번호와 DD 의 열린 테이블을 sync 로 맞추면
-     DD 가 공석 테이블에 쉬는 딜러를 자동으로 앉히고(fillVacancies), 깨진 테이블 딜러는 휴식으로 돌린다. */
-  const DE = (typeof DealerEngine !== 'undefined') ? DealerEngine : null;
-  const dd = (s) => { if (!s.dd) s.dd = DE.createState(); return s.dd; };
-  const ddTableId = (no) => 't' + no;
-  /** TD 의 열린 테이블 번호 ↔ DD 열린 테이블을 맞춘다. Store.commit 마다 호출 */
-  function sync(s, now) {
-    if (!DE) return;
-    now = now || Date.now();
-    const tdOpen = Array.from(new Set(s.tables.filter(t => t.status === 'open').map(t => t.number))).sort((a, b) => a - b);
-    let d = dd(s);
-    const ddOpen = DE.activeTables(d).map(t => t.no);
-    ddOpen.filter(no => !tdOpen.includes(no)).forEach(no => { d = DE.closeTable(d, ddTableId(no), now); });
-    const toOpen = tdOpen.filter(no => !ddOpen.includes(no));
-    if (toOpen.length) d = DE.openTable(d, toOpen, now);
-    s.dd = d;
+  /* ---------- 딜러: dealer-director(DD) 앱을 iframe(#ddFrame, dd/index.html)으로 통째로 띄우고 postMessage 로 잇는다 ----------
+     TD → DD: {td:'dd', type:'tables', open:[번호…]}  Store.commit 마다 열린 테이블 번호 전부 → DD 가 없는 번호는 열고(쉬는 딜러 자동 배치), 사라진 번호는 깬다
+     DD → TD: {dd:'td', type:'state', tables:[{no, dealer, since, feature}], staffing, clock, event, href}  그릴 때마다(바뀐 것만)
+              {dd:'td', type:'page', page:'login'|'list'|…}  이벤트가 열려 있지 않을 때
+     DD 상태는 DD 가 자기 저장소(dealer-director:…)에 들고 있다. 여기 live 는 화면 표시용 사본일 뿐 TD state 에 저장하지 않는다. */
+  const live = { page: null, event: null, tables: [], staffing: null, clock: null, dealers: 0, href: '', room: null, at: 0 };
+  const listeners = [];
+  const frame = () => document.getElementById('ddFrame');
+  const ddOrigin = () => (/^https?:$/.test(location.protocol) ? location.origin : '*');
+  function post(msg) { const f = frame(); if (!f || !f.contentWindow) return; try { f.contentWindow.postMessage(Object.assign({ td: 'dd' }, msg), ddOrigin()); } catch (e) { /* 아직 안 뜸 */ } }
+  const openNumbers = (s) => Array.from(new Set(s.tables.filter(t => t.status === 'open').map(t => t.number))).sort((a, b) => a - b);
+  /** TD 의 열린 테이블 번호를 DD 에 보낸다. Store.commit 마다 호출 (DD 가 아직 안 떴으면 DD 가 ready 를 보낼 때 다시) */
+  function sync(s) { post({ type: 'tables', open: openNumbers(s) }); }
+  function onMessage(e) {
+    const m = e.data; if (!m || m.dd !== 'td') return;
+    if (ddOrigin() !== '*' && e.origin !== ddOrigin()) return;
+    if (m.type === 'ready' || m.type === 'hello') { if (typeof Store !== 'undefined') sync(Store.get()); return; }
+    if (m.type === 'page') { Object.assign(live, { page: m.page, href: m.href || '', event: null, tables: [], staffing: null, clock: null, at: Date.now() }); }
+    else if (m.type === 'state') { Object.assign(live, { page: m.page, href: m.href || '', event: m.event, tables: m.tables || [], staffing: m.staffing, clock: m.clock, dealers: m.dealers || 0, room: m.room, blocked: m.blocked, at: Date.now() }); if (typeof Store !== 'undefined') sync(Store.get()); }
+    else return;
+    listeners.forEach(fn => fn(live));
   }
-  /** TD 테이블(id)에 앉은 DD 딜러 */
+  if (typeof window !== 'undefined') window.addEventListener('message', onMessage);
+  const onLive = (fn) => listeners.push(fn);
+  /** TD 테이블(id)에 앉은 DD 딜러 {name, since} */
   function dealerAt(s, tableId) {
-    const t = s.tables.find(x => x.id === tableId); if (!t || !s.dd) return null;
-    const dt = DE.tableOf(s.dd, ddTableId(t.number));
-    return dt && dt.status === 'open' && dt.dealerId ? DE.dealerOf(s.dd, dt.dealerId) : null;
+    const t = s.tables.find(x => x.id === tableId); if (!t) return null;
+    const dt = live.tables.find(x => x.no === t.number);
+    return dt && dt.dealer ? { name: dt.dealer, since: dt.since } : null;
   }
-  const dealers = (s) => (s.dd ? s.dd.dealers : []);
-  const run = (s, fn) => { s.dd = fn(dd(s), Date.now()); };
-  /** 이름(쉼표·줄바꿈 구분)으로 출근. 퇴근했던 사람은 복귀 */
-  const attend = (s, text) => run(s, (d, now) => String(text).split(/[,\n\t]+/).map(x => x.trim()).filter(Boolean).reduce((acc, name) => DE.attend(acc, name, now, true), d));
-  const sendHome = (s, id) => run(s, (d, now) => DE.sendHome(d, id, now));
-  const checkBack = (s, id) => run(s, (d, now) => DE.checkBack(d, id, now));
-  const toggleHold = (s, id) => run(s, (d, now) => DE.toggleHold(d, id, now));
-  const assign = (s, tableNo, id) => run(s, (d, now) => DE.assignDealer(d, ddTableId(tableNo), id, now));
-  const relieve = (s, tableNo) => run(s, (d, now) => DE.relieveTable(d, ddTableId(tableNo), now));
-  function rotate(s) { // 시작 전이면 로테이션 시작, 진행 중이면 지금 교대
-    const d = dd(s), now = Date.now();
-    if (!d.clock.running) { s.dd = DE.startClock(d, now); return null; }
-    const r = DE.executePush(d, now); s.dd = r.state; return r.plan;
-  }
-  const togglePause = (s) => run(s, (d, now) => d.clock.paused ? DE.resumeClock(d, now) : DE.pauseClock(d, now));
-  const setPushMinutes = (s, m) => run(s, (d, now) => DE.updateSettings(d, { pushMinutes: m }, now));
-  /** 설정 > 딜러: DD 설정(교대 간격·자동 교대·최대 연속 근무·최소 휴식 등)을 DD 함수로 바꾼다 */
-  const setDD = (s, patch) => run(s, (d, now) => DE.updateSettings(d, patch, now));
-  const nextPushIn = (s) => s.dd ? DE.msToPush(s.dd, Date.now()) : null;
-  /** 자동 교대 시각이 됐나 */
-  const pushDue = (s) => { const d = s.dd; return !!(d && d.clock.running && !d.clock.paused && d.settings.autoPush && DE.msToPush(d, Date.now()) <= 0); };
-  const planNext = (s) => s.dd && s.dd.clock.running ? DE.planPush(s.dd, Date.now()) : null;
-  const seatedMin = (s, d) => Math.max(0, Math.floor((DE.clockNow(s.dd, Date.now()) - d.since) / 60000));
+  const ddReady = () => live.page === 'event';
+  const nextPushIn = () => (live.clock && live.clock.running && live.clock.nextPushAt != null) ? live.clock.nextPushAt - (Date.now() + (live.clock.offset || 0)) : null;
+  const openSettings = () => post({ type: 'settings' });
+  const openShare = () => post({ type: 'share' });
+  /** DD 화면 주소: 마지막으로 열었던 이벤트(?e=…)를 기억해 두고 다시 연다 */
+  const frameSrc = (s) => 'dd/index.html' + ((s.settings && s.settings.ddHref) || '');
 
   return { defaultLevels, levels, clockOf, ensure, remain, levelNo, levelLabel, blindText, mmss, currentBB, breakIn, lateRegOpen, start, pause, setLevel, addTime, advance,
-    DE, dd, sync, dealerAt, dealers, attend, sendHome, checkBack, toggleHold, assign, relieve, rotate, togglePause, setPushMinutes, setDD, nextPushIn, pushDue, planNext, seatedMin };
+    live, onLive, sync, dealerAt, ddReady, nextPushIn, openSettings, openShare, frameSrc, post };
 })();

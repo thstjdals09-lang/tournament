@@ -3,7 +3,7 @@
    탭 역할: 등록 = 등록 폼 + 등록자 관리 (등록만)
            테이블 = 테이블·플레이어 조작 (정렬/검색/필터)
            클락 = 이벤트별 블라인드 클락·구조 편집·전광판
-           딜러 = 딜러 명단·테이블 배정·푸시(현장 공통)
+           딜러 = dealer-director 앱 통째로 (iframe dd/index.html, 테이블 열림/닫힘을 postMessage 로 전달)
            현황 = 현황판 + 상금 구조 + 순위표
            용지 = 바우처 발행·발행 내역
            설정 = 레지/테이블/클락/딜러/현황/용지 별 세부 설정 (좌석 번호 사용은 테이블 모양) */
@@ -51,7 +51,8 @@ const App = (() => {
   }
   function closeSheet() { const el = $('#sheet'); el.classList.add('hidden'); el.innerHTML = ''; }
   /** 테이블 오픈 안내 뒤에 붙는 자동 배치 딜러 문구 */
-  const dealerNote = (t) => { const d = Floor.dealerAt(S(), t.id); return d ? ' · 딜러 ' + d.name : (Floor.dealers(S()).length ? ' · 쉬는 딜러 없음' : ''); };
+  /** 테이블 오픈 안내 뒤에 붙는 딜러 문구. DD 가 답을 보내면(비동기) 따로 토스트가 뜨므로 여기서는 연결 여부만 */
+  const dealerNote = () => (F.ddReady() ? '' : (F.live.page ? ' · DD 이벤트를 열면 딜러가 배치됩니다' : ''));
   const tableName = (s, id) => { const t = L.tableOf(s, id); return t ? 'T' + t.number : '-'; };
   const seatLabel = (s, p) => p.status === 'active' ? `${tableName(s, p.tableId)} S${p.seat}` : `탈락 ${p.finishRank}위`;
   function noEventHtml() { return `<div class="card"><h2>이벤트가 없습니다</h2><p class="muted">먼저 이벤트를 만들어야 등록과 테이블 관리를 할 수 있습니다.</p><button class="primary" id="btnGoEvents">이벤트 만들기</button></div>`; }
@@ -693,7 +694,7 @@ const App = (() => {
   const clockPatch = (fn) => { const ev = curEvent(); if (!ev) return; Store.patch(st => { const e = L.eventOf(st, ev.id); F.ensure(e); fn(e); }); };
   function avgStack(s, ev) { const act = L.activePlayers(s, ev.id).length; return act && ev.startChips ? ev.startChips * L.eventPlayers(s, ev.id).length / act : 0; }
   function clockVals(s, ev) {
-    const lv = F.levels(ev), c = F.clockOf(ev), l = lv[c.idx], nx = lv[c.idx + 1], bi = F.breakIn(ev), pin = F.nextPushIn(s), ddc = s.dd && s.dd.clock;
+    const lv = F.levels(ev), c = F.clockOf(ev), l = lv[c.idx], nx = lv[c.idx + 1], bi = F.breakIn(ev), pin = F.nextPushIn(), ddc = F.live.clock;
     return {
       level: F.levelLabel(ev, c.idx) + (c.running ? '' : ' · 정지'),
       time: F.mmss(F.remain(c)),
@@ -701,7 +702,7 @@ const App = (() => {
       next: nx ? '다음 ' + (nx.brk ? '브레이크 ' + nx.min + '분' : F.blindText(nx)) : '마지막 레벨',
       toggle: c.running ? '일시정지' : '시작',
       break: l && l.brk ? '브레이크 중' : bi == null ? '-' : F.mmss(bi),
-      push: pin == null ? '로테이션 시작 전' : ddc && ddc.paused ? '일시정지' : pin <= 0 ? '지금' : F.mmss(pin),
+      push: pin == null ? (F.ddReady() ? '로테이션 시작 전' : 'DD 연결 전') : ddc && ddc.paused ? '일시정지' : pin <= 0 ? '지금' : F.mmss(pin),
       chip: `${F.levelLabel(ev, c.idx).replace('레벨 ', 'Lv')} ${F.mmss(F.remain(c))}${c.running ? '' : ' 정지'}`,
     };
   }
@@ -739,6 +740,7 @@ const App = (() => {
       ${kpi('남은 / 참가', act + ' / ' + all.length)}
       ${kpi('평균 스택', avg ? money(Math.round(avg)) + ' <span class="muted small">' + (avg / F.currentBB(ev)).toFixed(1) + 'BB</span>' : '<span class="muted small">스타팅 칩 미입력</span>')}
       ${kpi('다음 브레이크', '<span data-clk="break"></span>')}
+      ${kpi('딜러 교대', '<span data-clk="push"></span>')}
       ${kpi('레이트 레지', reg == null ? '<span class="muted small">설정 안 함</span>' : reg ? '진행 중' : '<span class="warn-text">마감</span>')}
       ${kpi('상금 풀', money(L.prizePool(s, ev)) + '원')}
     </div>
@@ -806,10 +808,6 @@ const App = (() => {
       Store.patch(st => due.forEach(d => { const e = L.eventOf(st, d.id); if (F.advance(e) && e.id === st.selectedEventId) curChanged = true; }));
       if (curChanged) { const ev = curEvent(); if (s.settings.levelBeep !== false) beep(); toast(ev.name + ' · ' + F.levelLabel(ev, ev.clock.idx) + ' ' + F.blindText(ev.levels[ev.clock.idx]), 4000); }
     }
-    if (F.pushDue(s)) {
-      let plan; Store.patch(st => { plan = F.rotate(st); });
-      if (s.settings.pushBeep !== false) beep(); toast(`딜러 교대 · ${plan ? plan.moves.filter(m => m.toDealerId).length : 0}테이블 바뀜`, 4000);
-    }
     // 설정 > 클락 > 레벨 끝나기 전 미리 알림 (지금 이벤트만, 레벨마다 한 번)
     const warn = +s.settings.warnBeforeMin || 0, cev = curEvent();
     if (warn && cev && cev.clock && cev.clock.running) {
@@ -822,68 +820,27 @@ const App = (() => {
     paintClock();
   }
 
-  /* ---------- 딜러 탭 (dealer-director 엔진) ---------- */
+  /* ---------- 딜러 탭: dealer-director 앱(iframe #ddFrame) ---------- */
   function viewDealers() {
-    const s = S(); const d = s.dd || F.DE.createState(); const ds = d.dealers, c = d.clock;
-    const ts = s.tables.filter(t => t.status === 'open').sort((a, b) => a.number - b.number);
-    const evName = (t) => { const e = L.eventOf(s, t.eventId); return e ? e.name : ''; };
-    const st = F.DE.staffing(d);
-    const empty = ts.filter(t => !F.dealerAt(s, t.id));
-    const plan = F.planNext(s);
-    const changes = plan ? plan.moves.filter(m => m.toDealerId) : [];
-    const nm = (id) => { const x = id && F.DE.dealerOf(d, id); return x ? h(x.name) : '-'; };
-    const tno = (x) => { const t = F.DE.tableOf(d, x.tableId); return t ? t.no : ''; };
-    const order = { working: 0, break: 1, off: 2 };
-    const list = ds.slice().sort((a, b) => order[a.status] - order[b.status] || (tno(a) || 0) - (tno(b) || 0) || a.since - b.since);
-    const state = !c.running ? '<span class="chip">시작 전</span>' : c.paused ? '<span class="chip warn">일시정지</span>' : '<span class="chip ok">진행 중</span>';
-    return `
-    ${empty.length && ds.length ? `<div class="banner warn"><span class="grow">딜러 없는 테이블 ${empty.length}개: ${empty.slice(0, 12).map(t => 'T' + t.number).join(', ')}${empty.length > 12 ? ' 외' : ''} · 쉬는 딜러가 출근하면 자동으로 앉습니다</span></div>` : ''}
-    <div class="card">
-      <div class="row tight" style="margin-bottom:8px"><h2 style="margin:0">딜러 로테이션</h2>${state}<span class="muted small">Dealer Director 엔진 · 테이블 ${st.tables} · 근무 ${st.working} · 휴식 ${st.onBreak}${st.diff < 0 ? ` · <span class="warn-text">${-st.diff}명 부족</span>` : ''}</span></div>
-      <div class="row tight">
-        <button class="primary" id="ddRotate">${c.running ? '지금 교대' : '로테이션 시작'}</button>
-        ${c.running ? `<button id="ddPause">${c.paused ? '재개' : '일시정지'}</button>` : ''}
-        <span class="muted">다음 교대 <b data-clk="push"></b></span>
-        <label class="chk">교대 간격 <input type="number" min="5" step="5" id="ddEvery" value="${d.settings.pushMinutes}" style="width:70px;padding:5px 8px">분</label>
-        <a class="btn-link sm" href="#settings" data-gosec="dealer">로테이션 설정</a>
-      </div>
-      <p class="muted small" style="margin:8px 0 0">테이블이 열리면 가장 오래 쉰 딜러가 자동으로 앉고, 테이블이 깨지면 그 딜러는 휴식으로 갑니다. 교대 때는 쉰 딜러 수만큼의 테이블만 바뀌고, 앉아 있던 딜러는 다른 테이블로 옮기지 않습니다.</p>
-      ${changes.length ? `<div class="list" style="margin-top:10px">${changes.map(m => `<div class="list-item"><div class="grow"><div class="t">T${F.DE.tableOf(d, m.tableId).no}</div><div class="s">${nm(m.fromDealerId)} → <b>${nm(m.toDealerId)}</b></div></div></div>`).join('')}</div>` : (c.running ? '<p class="muted small" style="margin:8px 0 0">다음 교대에 바뀌는 테이블이 없습니다.</p>' : '')}
-    </div>
-    <div class="card">
-      <h3>테이블별 딜러</h3>
-      ${ts.length ? `<div class="dealer-grid">${ts.map(t => { const cur = F.dealerAt(s, t.id); return `<div class="dealer-slot ${cur ? '' : 'none'}"><div><b>T${t.number}</b> <span class="muted small">${h(evName(t))}</span></div>
-        <select data-tdealer="${t.number}" class="sm-select"><option value="">${cur ? '' : '딜러 없음'}</option>${ds.filter(x => x.status !== 'off').map(x => `<option value="${x.id}" ${cur && cur.id === x.id ? 'selected' : ''}>${h(x.name)}${x.status === 'working' && x !== cur ? ' (T' + tno(x) + ')' : x.status === 'break' ? ' (휴식)' : ''}</option>`).join('')}</select>
-        <div class="row tight"><span class="muted small">${cur ? F.seatedMin(s, cur) + '분째' : ''}</span><span style="flex:1"></span>${cur ? `<button class="sm ghost" data-relieve="${t.number}">지금 교체</button>` : ''}</div></div>`; }).join('')}</div>` : '<div class="muted">열린 테이블이 없습니다. 등록하거나 테이블을 열면 여기에 나타납니다.</div>'}
-    </div>
-    <div class="card">
-      <div class="row tight" style="margin-bottom:8px"><h3 style="margin:0">출근 <span class="muted small">${ds.filter(x => x.status !== 'off').length}명 근무 중</span></h3></div>
-      <form id="dealerForm" class="row tight" style="margin-bottom:10px" autocomplete="off"><input name="name" placeholder="딜러 이름 (여러 명은 쉼표로)" style="flex:1;min-width:180px"><button class="primary" type="submit">출근</button></form>
-      <div class="list">${list.map(x => `<div class="list-item"><div class="grow"><div class="t">${h(x.name)} ${x.status === 'working' ? `<span class="chip ok">T${tno(x)} 근무</span>` : x.status === 'break' ? (x.hold ? '<span class="chip">보류</span>' : '<span class="chip warn">휴식</span>') : '<span class="chip">퇴근</span>'}</div>
-        <div class="s">${x.status === 'working' ? `이 자리 ${F.seatedMin(s, x)}분` : x.status === 'break' ? `휴식 ${Math.floor(F.DE.restedMs(x, Date.now()) / 60000)}분` : '퇴근'}</div></div>
-        ${x.status === 'break' ? `<button class="sm ghost" data-dhold="${x.id}">${x.hold ? '보류 해제' : '투입 보류'}</button>` : ''}
-        ${x.status === 'off' ? `<button class="sm ghost" data-dback="${x.id}">복귀</button>` : `<button class="sm ghost" data-dhome="${x.id}">퇴근</button>`}</div>`).join('') || '<div class="muted">출근한 딜러가 없습니다. 이름을 입력해 출근시키세요.</div>'}</div>
-    </div>`;
+    const l = F.live;
+    if (l.page === 'event') return '';
+    const msg = l.page === 'login' ? 'DD 계정으로 로그인하면 딜러 관리가 시작됩니다.'
+      : l.page === 'list' ? 'DD 에서 오늘 이벤트를 만들거나 고르세요. 그 이벤트에 레지·테이블 탭에서 여는 테이블이 자동으로 들어가 로테이션이 만들어집니다.'
+      : l.page ? 'DD 화면을 이벤트로 돌려 주세요.' : '딜러 디렉터를 불러오는 중입니다.';
+    return `<div class="banner warn dd-note"><span class="grow">${msg}</span></div>`;
   }
-  function bindDealers(root) {
-    const dd = (label, fn) => Store.commit(label, st => { fn(st); });
-    $('#ddRotate', root).addEventListener('click', () => {
-      const running = S().dd && S().dd.clock.running;
-      let plan; dd(running ? '딜러 교대' : '로테이션 시작', st => { plan = F.rotate(st); });
-      toast(running ? `교대 · ${plan ? plan.moves.filter(m => m.toDealerId).length : 0}테이블 바뀜` : '로테이션을 시작했습니다');
-    });
-    bindGoSec(root);
-    const pz = $('#ddPause', root); if (pz) pz.addEventListener('click', () => dd('로테이션 일시정지/재개', F.togglePause));
-    $('#ddEvery', root).addEventListener('change', (e) => { const m = Math.max(5, +e.target.value || 20); Store.patch(st => F.setPushMinutes(st, m)); });
-    $$('[data-tdealer]', root).forEach(sel => sel.addEventListener('change', () => { if (sel.value) dd('딜러 지정', st => F.assign(st, +sel.dataset.tdealer, sel.value)); }));
-    $$('[data-relieve]', root).forEach(b => b.addEventListener('click', () => dd('딜러 교체', st => F.relieve(st, +b.dataset.relieve))));
-    $('#dealerForm', root).addEventListener('submit', (e) => {
-      e.preventDefault(); const v = e.target.name.value.trim(); if (!v) { toast('이름을 입력하세요'); return; }
-      dd('딜러 출근: ' + v, st => F.attend(st, v)); const i = $('#dealerForm input[name=name]'); if (i) i.focus();
-    });
-    $$('[data-dhold]', root).forEach(b => b.addEventListener('click', () => dd('투입 보류', st => F.toggleHold(st, b.dataset.dhold))));
-    $$('[data-dhome]', root).forEach(b => b.addEventListener('click', () => dd('딜러 퇴근', st => F.sendHome(st, b.dataset.dhome))));
-    $$('[data-dback]', root).forEach(b => b.addEventListener('click', () => dd('딜러 복귀', st => F.checkBack(st, b.dataset.dback))));
+  function bindDealers() { /* 조작은 모두 iframe 안의 DD 가 맡는다 */ }
+  /** DD 가 보낸 상태가 바뀌었을 때: 주소 기억, 새 테이블에 앉은 딜러 안내, 딜러 칩이 보이는 탭이면 다시 그리기 */
+  let liveSig = '', livePrev = [];
+  function onDdLive(l) {
+    const s = S();
+    if (l.href !== (s.settings.ddHref || '')) Store.patch(st => { st.settings.ddHref = l.href; });
+    const prev = new Map(livePrev.map(t => [t.no, t.dealer]));
+    l.tables.forEach(t => { if (t.dealer && !prev.has(t.no) && s.tables.some(x => x.status === 'open' && x.number === t.no)) toast(`T${t.no} 딜러 ${t.dealer} 자동 배치`, 2500); });
+    livePrev = l.tables.slice();
+    const sig = l.page + '|' + JSON.stringify(l.tables) + '|' + (l.event && l.event.name);
+    if (sig !== liveSig) { liveSig = sig; if (['tables', 'dealers', 'settings'].includes(ui.tab)) render(); }
+    paintClock();
   }
 
   /* ---------- 설정 탭: 레지 / 테이블 / 클락 / 딜러 / 현황 / 용지 ----------
@@ -971,16 +928,16 @@ const App = (() => {
       </div>
       ${blindEditorHtml(s, ev)}`;
     } else if (sec === 'dealer') {
-      const ds = (s.dd || F.DE.createState()).settings;
+      const l = F.live;
       body = `
-      <div class="card"><h3>로테이션 ${scope('현장 공통 · Dealer Director')}</h3>
-        ${numRow('data-dd', 'pushMinutes', ds.pushMinutes, '교대 간격', '바꾸면 다음 교대 시각이 바로 옮겨집니다 (5분 단위)', '분', 5)}
-        <label class="set-row"><span class="set-l">자동 교대<small>끄면 딜러 탭의 '지금 교대'로만 교대합니다</small></span><input type="checkbox" data-dd="autoPush" ${ds.autoPush ? 'checked' : ''}></label>
-        ${numRow('data-dd', 'maxWorkMinutes', ds.maxWorkMinutes, '최대 연속 근무', '넘긴 딜러를 먼저 교대 · 0 은 제한 없음', '분')}
-        ${numRow('data-dd', 'minRestMinutes', ds.minRestMinutes, '최소 휴식', '이보다 짧게 쉰 딜러는 교대에 넣지 않습니다', '분')}
-        ${numRow('data-dd', 'shortSeatMinutes', ds.shortSeatMinutes, '짧은 근무 기준', '이보다 짧게 앉은 딜러는 교대 대상이 아닙니다', '분')}
-        ${setChk('pushBeep', '교대 때 알림음')}
-        <p class="muted small" style="margin:8px 0 0">테이블이 열리면 가장 오래 쉰 딜러가 자동으로 앉고, 교대 때 앉아 있던 딜러는 다른 테이블로 옮기지 않습니다 (DD 규칙).</p>
+      <div class="card"><h3>딜러 디렉터 ${scope('현장 공통')}</h3>
+        <p class="muted small" style="margin:0 0 10px">딜러 관리는 DD(dealer-director)를 그대로 씁니다. 로테이션 규칙·교대 간격·음성 안내·딜러 QR·휴대폰·TV 보드는 모두 DD 안에서 정합니다.<br>
+        레지·테이블 탭에서 테이블이 열리고 닫히면 DD 에 자동으로 반영되어 로테이션이 만들어집니다.</p>
+        <div class="list">
+          <div class="list-item"><div class="grow"><div class="t">DD 이벤트</div><div class="s">${l.page === 'event' ? h(l.event.name) + (l.staffing ? ` · 테이블 ${l.staffing.tables} · 근무 ${l.staffing.working} · 휴식 ${l.staffing.onBreak}` : '') : l.page === 'login' ? '로그인 필요' : l.page === 'list' ? '이벤트를 고르지 않음' : '연결 전'}</div></div><a class="btn-link sm" href="#dealers">딜러 탭 열기</a></div>
+          <div class="list-item"><div class="grow"><div class="t">로테이션 설정</div><div class="s">교대 간격, 최대 연속 근무, 최소 휴식, 짧은 근무 기준, 교대 예고, 자동 교대, 음성 안내</div></div><button class="sm ghost" id="ddOpenSettings" ${l.page === 'event' ? '' : 'disabled'}>DD 설정 열기</button></div>
+          <div class="list-item"><div class="grow"><div class="t">딜러 QR · 휴대폰 · TV 보드</div><div class="s">${l.room ? '이 이벤트의 공유가 켜져 있습니다' : 'DD 에서 이벤트를 열면 QR 이 만들어집니다'}</div></div><button class="sm ghost" id="ddOpenShare" ${l.page === 'event' ? '' : 'disabled'}>딜러 QR 열기</button></div>
+        </div>
       </div>`;
     } else if (sec === 'event') {
       body = `${eventFormHtml(ev, false)}
@@ -1019,6 +976,8 @@ const App = (() => {
     $$('[data-evseat]', root).forEach(b => b.addEventListener('click', () => {
       Store.commit('좌석 번호 사용 변경', st => L.toggleEventSeat(st, evId, +b.dataset.evseat));
     }));
+    const os = $('#ddOpenSettings', root); if (os) os.addEventListener('click', () => { location.hash = '#dealers'; setTimeout(F.openSettings, 50); });
+    const osh = $('#ddOpenShare', root); if (osh) osh.addEventListener('click', () => { location.hash = '#dealers'; setTimeout(F.openShare, 50); });
     if ($('#lvAdd', root)) bindBlindEditor(root, evId);
     bindEventForm(root, false);
     $$('[data-ptab]', root).forEach(b => b.addEventListener('click', () => { ui.printTab = b.dataset.ptab; render(); }));
@@ -1094,6 +1053,8 @@ const App = (() => {
     renderTop();
     if (ui.tab !== 'home' && !curEvent()) ui.tab = 'home';
     document.body.classList.toggle('at-home', ui.tab === 'home');
+    document.body.classList.toggle('at-dealers', ui.tab === 'dealers');
+    $('#ddFrame').hidden = ui.tab !== 'dealers';
     const v = VIEWS[ui.tab] || VIEWS.home;
     const root = $('#view'); root.innerHTML = v[0](); v[1](root);
     $$('#tabbar a').forEach(a => a.classList.toggle('active', a.dataset.tab === ui.tab));
@@ -1114,6 +1075,8 @@ const App = (() => {
     window.addEventListener('resize', syncTopbarHeight);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#board').classList.contains('hidden')) closeBoard(); });
     setInterval(tick, 500);
+    $('#ddFrame').src = F.frameSrc(S()); // DD 는 탭과 무관하게 항상 떠 있다 (교대 시계·휴대폰 공유)
+    F.onLive(onDdLive);
     if (!S().selectedEventId && S().events.length) Store.patch(st => st.selectedEventId = st.events[0].id);
     render();
   }

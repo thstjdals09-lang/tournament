@@ -1,5 +1,3 @@
-/* dealer-director(DD) 로테이션 엔진 — thstjdals09-lang/dealer-director js/engine.js (28e9804) 를 그대로 복사.
-   고칠 때는 DD 저장소에서 고치고 이 파일을 다시 복사한다. Holdem TD 쪽 연결은 js/floor.js 의 딜러 부분. */
 /*
  * 딜러 로테이션 엔진 — 순수 로직만 둔다 (DOM/저장소 의존 없음).
  * 모든 공개 함수는 state를 직접 바꾸지 않고 새 state를 돌려준다.

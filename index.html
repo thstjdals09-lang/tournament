@@ -21,6 +21,8 @@
 </header>
 
 <main id="view"></main>
+<!-- 딜러 탭 = dealer-director 앱 통째로 (dd/). 탭을 옮겨도 내려가지 않게 #view 밖에 둔다 (교대 시계·휴대폰 공유가 계속 돈다) -->
+<iframe id="ddFrame" class="dd-frame" title="딜러 디렉터" hidden></iframe>
 
 <nav id="tabbar">
   <a href="#reg" data-tab="reg">등록</a>
@@ -39,7 +41,6 @@
 
 <script src="js/store.js"></script>
 <script src="js/logic.js"></script>
-<script src="js/dd-engine.js"></script>
 <script src="js/floor.js"></script>
 <script src="js/print.js"></script>
 <script src="js/app.js"></script>
