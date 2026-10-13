@@ -33,7 +33,6 @@ const Store = (() => {
       // 클락
       levelBeep: true, warnBeforeMin: 0, boardAvg: true, boardPool: true, boardFirst: true, boardBreak: true,
       // 딜러 (DD iframe 이 마지막으로 열었던 이벤트 주소 '?e=…')
-      ddHref: '',
     };
   }
 
@@ -62,7 +61,7 @@ const Store = (() => {
   function migrate(s) {
     s.settings = Object.assign(defaultSettings(), s.settings || {});
     (s.events || []).forEach(e => { delete e.disabledTables; });
-    delete s.dd; // 예전에 TD 안에 넣어 두던 DD 엔진 상태 — 이제 DD 앱(dd/)이 자기 저장소에 둔다
+    delete s.dd; if (s.settings) delete s.settings.ddHref; // 예전에 TD 안에 넣어 두던 DD 엔진 상태 — 이제 DD 앱(dd/)이 자기 저장소에 둔다
     return s;
   }
 
@@ -85,7 +84,7 @@ const Store = (() => {
     return result === undefined ? true : result;
   }
   /** 히스토리에 남기지 않는 사소한 변경(설정, 템플릿 편집, 선택 이벤트) */
-  function patch(fn) { fn(state); save(); emit(); }
+  function patch(fn) { fn(state); save(); if (typeof Floor !== 'undefined') Floor.sync(state); emit(); } // 이벤트 선택이 바뀌면 DD 도 그 이벤트로
 
   function undo() {
     const h = past.pop(); if (!h) return null;

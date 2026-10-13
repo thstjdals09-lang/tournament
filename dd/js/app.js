@@ -9,6 +9,9 @@
   const $ = id => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   const VIEW = params.get('view');
+  // Holdem TD(토너먼트 관리 프로그램) 안에 iframe 으로 들어가 있으면 '내장 모드' — 맨 아래 'Holdem TD 내장 모드' 다리가 부모와 통신한다
+  const embedded = (() => { try { return window.parent !== window; } catch (e) { return false; } })();
+  if (embedded) document.documentElement.classList.add('embedded');
   const isBoard = VIEW === 'board'; // 딜러룸 TV
   const isMe = VIEW === 'me';       // 딜러 휴대폰
   const ME_KEY = 'dealer-director:me';
@@ -1357,7 +1360,7 @@
   }
 
   function render(now) {
-    if (td) setTimeout(td.report, 0); // Holdem TD 에 지금 상태 알림 (바뀐 게 없으면 보내지 않는다)
+    if (td) setTimeout(td.report, 0); // Holdem TD 내장 모드: 그린 뒤 상태를 부모에게
     if (needLogin || needFetch) return;
     if (isAdminView) {
       renderAdmin();
@@ -1916,17 +1919,23 @@
     const ev = EV.find(eventList(), id);
     if (!ev || !confirm(`'${ev.name}' 이벤트를 삭제할까요?\n테이블·딜러·출퇴근·기록·공지가 모두 지워지고 되돌릴 수 없습니다 (다른 PC에서도).${ev.room
       ? '\n이 이벤트의 딜러 휴대폰 링크(QR)도 더 이상 동작하지 않습니다.' : ''}`)) return;
+    return removeEvent(id);
+  }
+  async function removeEvent(id) {
+    const ev = EV.find(eventList(), id);
+    if (!ev) return false;
     try {
       if (!(await sessionOk())) return;
       await S.patch(FB.databaseURL, `users/${auth.uid}`, { [`events/${id}`]: null, [`states/${id}`]: null }, await syncIdToken());
     } catch (e) {
       toast(`삭제하지 못했습니다 — ${S.explainError(e.message)}`);
-      return;
+      return false;
     }
     if (ev.room) clearRoom(ev.room);
     EV.remove(store, id);
     render();
     toast(`'${ev.name}' 삭제됨`);
+    return true;
   }
 
   document.addEventListener('keydown', e => {
@@ -2932,22 +2941,37 @@
     $('formAccount').elements.until.hidden = e.target.value !== '0';
   });
 
-
-  // ---------- Holdem TD 다리 (tournament/dd 복사본에만 있는 블록 — DD 원본을 다시 복사할 때 이 블록과 index.html 의 td-theme.css 링크를 남길 것) ----------
-  // Holdem TD 가 이 화면을 iframe 으로 열면: 부모가 보내는 '열린 테이블 번호'에 맞춰 DD 테이블을 열고 닫고(자동 로테이션),
-  // 그릴 때마다 테이블→딜러·시계·이벤트를 부모에게 알린다. 딜러 휴대폰·TV·단독 실행에서는 아무것도 하지 않는다.
+  // ---------- Holdem TD 내장 모드 (postMessage 다리) ----------
+  // Holdem TD(토너먼트 관리 프로그램, thstjdals09-lang/tournament)가 이 앱을 통째로 복사해(`dd/`) 딜러 탭 iframe 으로 연다.
+  // 단독으로 열면(부모 창 없음) 아무것도 하지 않는다. 딜러 휴대폰·TV 화면도 마찬가지.
+  //  TD → DD  {td:'dd', type:'event', id, name}        TD 이벤트 하나 = DD 이벤트 하나(id 는 TD 가 정한다). 없으면 계정에서 받아 오고,
+  //                                                   그래도 없으면 새로 만들어 연다. 열려 있으면 이름만 맞춘다
+  //           {td:'dd', type:'tables', event, open:[…]} TD 에서 열린 테이블 번호 — 그 이벤트가 열려 있을 때만 DD 테이블을 열고 닫는다
+  //                                                   (열면 쉬는 딜러가 자동으로 앉고, 깨면 그 딜러는 휴식)
+  //           {td:'dd', type:'deleteEvent', id} · {type:'logout'} · {type:'settings'} · {type:'share'} · {type:'hello'}
+  //  DD → TD  {dd:'td', type:'state', page:'event', event:{id,name}, account, blocked, tables:[{no,dealer,since,feature}],
+  //                     staffing, dealers, clock, room}                그릴 때마다(바뀐 것만)
+  //           {dd:'td', type:'page', page:'login'|'fetch'|'list'|'admin'|'view', account, blocked, height}  이벤트가 열려 있지 않을 때
+  //           {dd:'td', type:'ready'}                                  시작 끝
+  // 부모가 '로그인 전'(page:'login')이나 blocked 를 받으면 앱 전체를 막는다 — 판매자가 승인한 DD 계정만 TD 를 쓸 수 있다.
   const td = (() => {
-    let parentWin = null;
-    try { parentWin = window.parent !== window ? window.parent : null; } catch (e) { parentWin = null; }
-    if (!parentWin) return null;
+    if (!embedded) return null;
     const origin = /^https?:$/.test(location.protocol) ? location.origin : '*';
-    const post = msg => { try { parentWin.postMessage(Object.assign({ dd: 'td' }, msg), origin); } catch (e) { /* 부모 없음 */ } };
+    const post = msg => { try { window.parent.postMessage(Object.assign({ dd: 'td' }, msg), origin); } catch (e) { /* 부모 없음 */ } };
     let lastSig = '';
+    let opening = null; // 지금 열러 가는 이벤트 id (같은 요청이 겹쳐 와도 한 번만)
     const page = needLogin ? 'login' : needFetch ? 'fetch' : isAdminView ? 'admin' : isList ? 'list' : (isBoard || isMe) ? 'view' : 'event';
+    const accountInfo = () => (auth ? { name: auth.name || '', email: auth.email || '', until: auth.until || 0, admin: !!auth.admin } : null);
+    function send(msg) {
+      const sig = JSON.stringify(msg);
+      if (sig === lastSig) return;
+      lastSig = sig;
+      post(msg);
+    }
     function report() {
-      if (page !== 'event') { // 로그인·목록 화면: 부모는 이것으로 '로그인 전'을 알고 앱 전체를 막는다 (승인된 DD 계정만 사용)
-        const pm = { type: 'page', page, href: location.search, blocked };
-        const psig = JSON.stringify(pm); if (psig === lastSig) return; lastSig = psig; post(pm); return;
+      if (page !== 'event') {
+        send({ type: 'page', page, account: accountInfo(), blocked, height: document.documentElement.scrollHeight });
+        return;
       }
       const now = nowMs();
       const tables = E.activeTables(state).map(t => {
@@ -2956,18 +2980,45 @@
       });
       const st = E.staffing(state);
       const c = state.clock;
-      const msg = { type: 'state', page, href: location.search, event: { id: event.id, name: event.name }, blocked,
+      send({ type: 'state', page, event: { id: event.id, name: event.name }, account: accountInfo(), blocked,
         tables, staffing: { tables: st.tables, working: st.working, onBreak: st.onBreak, diff: st.diff },
         dealers: state.dealers.filter(d => d.status !== 'off').length,
-        clock: { running: c.running, paused: c.paused, nextPushAt: c.nextPushAt, offset: now - Date.now() }, room: room() };
-      const sig = JSON.stringify(msg);
-      if (sig === lastSig) return;
-      lastSig = sig;
-      post(msg);
+        clock: { running: c.running, paused: c.paused, nextPushAt: c.nextPushAt, offset: now - Date.now() }, room: room() });
+    }
+    // TD 이벤트 → DD 이벤트. 이 PC 에 있으면 바로, 계정(다른 PC)에 있으면 받아서, 없으면 새로 만들어 연다
+    function openEvent(id, name) {
+      if (!isDirector || blocked || !id) return;
+      if (page === 'event' && event.id === id) {
+        if (name && name !== event.name) setEventName(name);
+        return;
+      }
+      if (opening === id) return;
+      opening = id;
+      const go = () => { location.href = eventUrl(id); };
+      if (EV.find(eventList(), id) && store.getItem(EV.stateKey(id)) != null) return go();
+      fetchEvent(id).catch(() => false).then(ok => {
+        if (!ok) createEvent(id, name);
+        go();
+      });
+    }
+    function createEvent(id, name) {
+      // 새 이벤트는 가장 최근 이벤트의 출근자 명단을 물려받는다 (formEvent 와 같다)
+      const fresh = E.createState();
+      const prev = EV.list(store)[0];
+      const prevState = prev ? EV.loadState(store, prev.id) : null;
+      if (prevState) fresh.roster = E.rosterEntries(prevState.roster);
+      EV.create(store, name, Date.now(), fresh, { id });
+    }
+    function setEventName(name) {
+      EV.update(store, event.id, { name });
+      markChanged(event.id);
+      $('eventName').textContent = name;
+      document.title = `${name} · 딜러 디렉터`;
+      report();
     }
     // 부모의 열린 테이블 번호 ↔ DD 열린 테이블. 없는 번호는 열고(쉬는 딜러가 자동으로 앉는다), 부모에 없는 테이블은 깬다
-    function syncTables(open) {
-      if (page !== 'event' || blocked) return;
+    function syncTables(evId, open) {
+      if (page !== 'event' || blocked || (evId && event.id !== evId)) return;
       const want = Array.from(new Set((open || []).map(Number).filter(n => n > 0))).sort((a, b) => a - b);
       const now = Date.now();
       let next = state;
@@ -2978,19 +3029,29 @@
       if (next !== state) commit(next); // 부모(레지·테이블 탭)가 한 일이므로 DD 되돌리기 목록에는 넣지 않는다
       report();
     }
+    async function dropEvent(id) {
+      if (!isDirector || !id) return;
+      const ok = await removeEvent(id); // TD 가 이미 물어봤으므로 확인 없이
+      if (ok && page === 'event' && event.id === id) location.href = homeUrl();
+    }
     window.addEventListener('message', e => {
       const m = e.data;
       if (!m || m.td !== 'dd') return;
       if (origin !== '*' && e.origin !== origin) return;
-      if (m.type === 'tables') syncTables(m.open);
+      if (m.type === 'event') openEvent(String(m.id || ''), String(m.name || ''));
+      else if (m.type === 'tables') syncTables(m.event ? String(m.event) : null, m.open);
+      else if (m.type === 'deleteEvent') dropEvent(String(m.id || ''));
+      else if (m.type === 'logout') { if (isDirector) logout(); }
       else if (m.type === 'settings' && page === 'event') $('btnSettings').click();
       else if (m.type === 'share' && page === 'event') $('btnShare').click();
       else if (m.type === 'hello') report();
     });
-    // 계정 차단(다른 PC 로그인·기간 만료·정지)이 뜨면 부모에게 바로 알린다 — renderGate 는 render 를 거치지 않으므로
+    // 계정 차단(다른 PC 로그인·기간 만료·정지)과 관리자 화면(계정 목록 받은 뒤)은 render 를 거치지 않으므로 직접 보고
     const renderGate0 = renderGate;
     renderGate = function () { renderGate0(); report(); };
-    return { report };
+    const renderAdmin0 = renderAdmin;
+    renderAdmin = function () { renderAdmin0(); report(); };
+    return { report, hello: () => { report(); post({ type: 'ready' }); } };
   })();
 
   // ---------- 시작 ----------
@@ -3009,7 +3070,7 @@
     const f = $('formLogin').elements;
     f.email.value = loadJson(EMAIL_KEY) || '';
     (f.email.value ? f.password : f.email).focus();
-    if (td) td.report(); // Holdem TD 다리: '로그인 전'을 부모에게 (앱 문)
+    if (td) td.report(); // 내장 모드: '로그인 전'을 부모에게 (부모는 앱 전체를 막는다)
     return;
   }
 
@@ -3022,7 +3083,7 @@
     const back = `<a class="btn" href="${esc(homeUrl())}">이벤트 목록</a>`;
     g.innerHTML = '<div class="gate-box"><h2>이벤트를 불러오는 중…</h2></div>';
     g.hidden = false;
-    if (td) td.report(); // Holdem TD 다리
+    if (td) td.report();
     fetchEvent(wantEvent).then(ok => {
       if (blocked) return;
       if (ok) location.reload();
@@ -3101,7 +3162,6 @@
     if (!room() && !event.shareOff) openRoom();
   }
   render();
-  if (td) { td.report(); post_hello(); }
+  if (td) td.hello();
   startTicker(() => tick());
-  function post_hello() { try { window.parent.postMessage({ dd: 'td', type: 'ready' }, /^https?:$/.test(location.protocol) ? location.origin : '*'); } catch (e) { /* 부모 없음 */ } }
 })();

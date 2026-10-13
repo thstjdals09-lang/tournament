@@ -16,6 +16,7 @@ const App = (() => {
   const money = Print.fmtMoney;
 
   const ui = {
+    adminOpen: true, // 홈의 DD 계정 발급·관리 펼침 (관리자만)
     tab: (location.hash || '#home').slice(1),
     regForm: { name: '', phone: '', buyIn: '', memo: '' },
     regSeat: null, regSearch: '',
@@ -589,11 +590,18 @@ const App = (() => {
       dash = `<div class="card"><div class="row tight" style="margin-bottom:10px"><h2 style="margin:0">${h(ev.name)}</h2><span style="flex:1"></span>${secs.map(([k, lb]) => `<button class="sm ${ui.eventSection === k ? 'primary' : 'ghost'}" data-esec="${k}">${lb}</button>`).join('')}<button class="sm ghost" data-editevent="${ev.id}">이벤트 설정</button></div>${body}</div>`;
     }
     if (ui.tab !== 'home') return editForm || dash;
-    return `${editForm}
+    const acc = F.live.account;
+    const untilTxt = acc && acc.until ? `이용 기간 ${new Date(acc.until).toLocaleDateString('ko-KR')}까지 (${Math.max(0, Math.ceil((acc.until - Date.now()) / 86400000))}일 남음)` : '';
+    const accCard = acc ? `<div class="card account-card"><div class="row tight"><div class="grow"><div class="t"><b>${h(acc.name || acc.email)}</b> <span class="muted small">${h(acc.email)}</span>${acc.admin ? ' <span class="chip">관리자</span>' : ''}</div><div class="s muted small">${untilTxt}</div></div>
+      ${acc.admin ? `<button class="sm ghost" id="btnAdminToggle">${ui.adminOpen ? '계정 관리 접기' : '계정 발급·관리'}</button>` : ''}<button class="sm ghost" id="btnDdLogout">로그아웃</button></div></div>` : '';
+    const adminCard = acc && acc.admin && ui.adminOpen ? `<div class="card admin-card"><h3 style="margin:0 0 4px">DD 계정 발급·관리 <span class="scope">관리자</span></h3><p class="muted small" style="margin:0">판매자(관리자) 계정으로 로그인했을 때만 보입니다. 여기서 만든 계정으로 Holdem TD 와 딜러 디렉터에 로그인합니다. 아래 표에서 연장·정지·비밀번호 재설정을 합니다.</p></div>` : '';
+    return `${accCard}${editForm}
     <div class="card"><div class="row tight"><h2 style="margin:0">이벤트</h2><span class="muted small">들어가면 그 이벤트의 등록·테이블·클락·딜러를 관리합니다</span><span style="flex:1"></span><button class="primary" id="btnNewEvent">새 이벤트 만들기</button></div>
-      <div class="list" style="margin-top:12px">${list || '<div class="muted">이벤트가 없습니다. 새 이벤트를 만들어 시작하세요.</div>'}</div></div>`;
+      <div class="list" style="margin-top:12px">${list || '<div class="muted">이벤트가 없습니다. 새 이벤트를 만들어 시작하세요.</div>'}</div></div>${adminCard}`;
   }
   function bindEvents(root) {
+    const lo = $('#btnDdLogout', root); if (lo) lo.addEventListener('click', async () => { if (await confirmBox('딜러 디렉터 계정에서 로그아웃할까요? 다시 로그인해야 앱을 쓸 수 있습니다.', '로그아웃', true)) F.logout(); });
+    const at = $('#btnAdminToggle', root); if (at) at.addEventListener('click', () => { ui.adminOpen = !ui.adminOpen; render(); });
     const nb = $('#btnNewEvent', root); if (nb) nb.addEventListener('click', () => { ui.eventEdit = 'new'; render(); setTimeout(() => { const i = $('#eventForm input[name=name]'); if (i) i.focus(); }, 0); });
     $$('[data-enter]', root).forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); enterEvent(el.dataset.enter); }));
     $$('[data-editevent]', root).forEach(b => b.addEventListener('click', () => openSettings(b.dataset.editevent, 'event')));
@@ -628,7 +636,8 @@ const App = (() => {
     const cancel = $('#btnCancelEvent', root); if (cancel) cancel.addEventListener('click', () => { ui.eventEdit = null; render(); });
     const del = $('#btnDeleteEvent', root); if (del) del.addEventListener('click', async () => {
       const ev = L.eventOf(S(), editId); const n = L.eventPlayers(S(), ev.id).length;
-      if (!await confirmBox(`"${ev.name}" 이벤트와 참가자 ${n}명, 테이블 정보를 모두 삭제할까요?\n(되돌리기 가능)`, '삭제', true)) return;
+      if (!await confirmBox(`"${ev.name}" 이벤트와 참가자 ${n}명, 테이블 정보를 모두 삭제할까요?\n딜러 디렉터의 이 이벤트(로테이션·출퇴근 기록)도 지워지며 그것은 되돌릴 수 없습니다.`, '삭제', true)) return;
+      F.deleteEvent(ev);
       Store.commit('이벤트 삭제: ' + ev.name, st => L.deleteEvent(st, ev.id)); ui.eventEdit = null; toast('이벤트 삭제됨'); location.hash = '#home';
     });
   }
@@ -849,8 +858,8 @@ const App = (() => {
     const l = F.live;
     if (l.page === 'event') return '';
     const msg = l.page === 'login' ? 'DD 계정으로 로그인하면 딜러 관리가 시작됩니다.'
-      : l.page === 'list' ? 'DD 에서 오늘 이벤트를 만들거나 고르세요. 그 이벤트에 레지·테이블 탭에서 여는 테이블이 자동으로 들어가 로테이션이 만들어집니다.'
-      : l.page ? 'DD 화면을 이벤트로 돌려 주세요.' : '딜러 디렉터를 불러오는 중입니다.';
+      : l.page === 'list' || l.page === 'fetch' ? '딜러 디렉터에서 이 이벤트를 여는 중입니다.'
+      : l.page ? '딜러 디렉터 화면을 이벤트로 돌려 주세요.' : '딜러 디렉터를 불러오는 중입니다.';
     return `<div class="banner warn dd-note"><span class="grow">${msg}</span></div>`;
   }
   function bindDealers() { /* 조작은 모두 iframe 안의 DD 가 맡는다 */ }
@@ -858,14 +867,13 @@ const App = (() => {
   let liveSig = '', livePrev = [];
   function onDdLive(l) {
     const s = S();
-    if (l.href !== (s.settings.ddHref || '')) Store.patch(st => { st.settings.ddHref = l.href; });
     const prev = new Map(livePrev.map(t => [t.no, t.dealer]));
     l.tables.forEach(t => { if (t.dealer && !prev.has(t.no) && s.tables.some(x => x.status === 'open' && x.number === t.no)) toast(`T${t.no} 딜러 ${t.dealer} 자동 배치`, 2500); });
     livePrev = l.tables.slice();
     const gate = F.gate();
     if (gate !== ui.gate) { ui.gate = gate; render(); if (gate === 'ok' && ui.gateWas === 'login') toast('로그인됨 · ' + (l.href ? '이벤트를 이어서 엽니다' : 'DD 에서 오늘 이벤트를 고르세요'), 3000); ui.gateWas = gate; return; }
-    const sig = l.page + '|' + JSON.stringify(l.tables) + '|' + (l.event && l.event.name);
-    if (sig !== liveSig) { liveSig = sig; if (['tables', 'dealers', 'settings'].includes(ui.tab)) render(); }
+    const sig = l.page + '|' + JSON.stringify(l.tables) + '|' + (l.event && l.event.id) + '|' + JSON.stringify(l.account);
+    if (sig !== liveSig) { liveSig = sig; if (['home', 'tables', 'dealers', 'settings'].includes(ui.tab)) render(); }
     paintClock();
   }
 
@@ -957,12 +965,12 @@ const App = (() => {
       const l = F.live;
       body = `
       <div class="card"><h3>딜러 디렉터 ${scope('현장 공통')}</h3>
-        <p class="muted small" style="margin:0 0 10px">딜러 관리는 DD(dealer-director)를 그대로 씁니다. 로테이션 규칙·교대 간격·음성 안내·딜러 QR·휴대폰·TV 보드는 모두 DD 안에서 정합니다.<br>
+        <p class="muted small" style="margin:0 0 10px">딜러 관리는 딜러 디렉터(DD)를 그대로 씁니다. 이 이벤트가 곧 DD 이벤트이며(따로 만들지 않음), 로테이션 규칙·교대 간격·음성 안내·딜러 QR·휴대폰·TV 보드는 딜러 탭 안에서 정합니다.<br>
         레지·테이블 탭에서 테이블이 열리고 닫히면 DD 에 자동으로 반영되어 로테이션이 만들어집니다.</p>
         <div class="list">
-          <div class="list-item"><div class="grow"><div class="t">DD 이벤트</div><div class="s">${l.page === 'event' ? h(l.event.name) + (l.staffing ? ` · 테이블 ${l.staffing.tables} · 근무 ${l.staffing.working} · 휴식 ${l.staffing.onBreak}` : '') : l.page === 'login' ? '로그인 필요' : l.page === 'list' ? '이벤트를 고르지 않음' : '연결 전'}</div></div><a class="btn-link sm" href="#dealers">딜러 탭 열기</a></div>
+          <div class="list-item"><div class="grow"><div class="t">딜러 디렉터 이벤트</div><div class="s">${l.page === 'event' ? h(l.event.name) + (l.staffing ? ` · 테이블 ${l.staffing.tables} · 근무 ${l.staffing.working} · 휴식 ${l.staffing.onBreak}` : '') : l.page === 'login' ? '로그인 필요' : l.page ? '여는 중' : '연결 전'}</div></div><a class="btn-link sm" href="#dealers">딜러 탭 열기</a></div>
           <div class="list-item"><div class="grow"><div class="t">로테이션 설정</div><div class="s">교대 간격, 최대 연속 근무, 최소 휴식, 짧은 근무 기준, 교대 예고, 자동 교대, 음성 안내</div></div><button class="sm ghost" id="ddOpenSettings" ${l.page === 'event' ? '' : 'disabled'}>DD 설정 열기</button></div>
-          <div class="list-item"><div class="grow"><div class="t">딜러 QR · 휴대폰 · TV 보드</div><div class="s">${l.room ? '이 이벤트의 공유가 켜져 있습니다' : 'DD 에서 이벤트를 열면 QR 이 만들어집니다'}</div></div><button class="sm ghost" id="ddOpenShare" ${l.page === 'event' ? '' : 'disabled'}>딜러 QR 열기</button></div>
+          <div class="list-item"><div class="grow"><div class="t">딜러 QR · 휴대폰 · TV 보드</div><div class="s">${l.room ? '이 이벤트의 공유가 켜져 있습니다' : '딜러 탭이 열리면 QR 이 만들어집니다'}</div></div><button class="sm ghost" id="ddOpenShare" ${l.page === 'event' ? '' : 'disabled'}>딜러 QR 열기</button></div>
         </div>
       </div>`;
     } else if (sec === 'event') {
@@ -1030,7 +1038,7 @@ const App = (() => {
         r.onload = () => { try { Store.importJSON(r.result); toast('가져오기 완료'); } catch (err) { toast('가져오기 실패: ' + err.message); } };
         r.readAsText(f);
       });
-      $('#btnReset', root).addEventListener('click', async () => { if (await confirmBox('모든 이벤트/참가자/테이블/바우처를 삭제합니다. 계속할까요?', '계속', true) && await confirmBox('정말로 초기화할까요? (되돌리기 1회 가능)', '초기화', true)) { Store.reset(); toast('초기화됨'); location.hash = '#home'; } });
+      $('#btnReset', root).addEventListener('click', async () => { if (await confirmBox('모든 이벤트/참가자/테이블/바우처를 삭제합니다. 딜러 디렉터의 이벤트(딜러 기록)도 함께 지워집니다. 계속할까요?', '계속', true) && await confirmBox('정말로 초기화할까요? (되돌리기 1회 가능, 딜러 기록은 복구 불가)', '초기화', true)) { S().events.forEach(ev => F.deleteEvent(ev)); Store.reset(); toast('초기화됨'); location.hash = '#home'; } });
     }
   }
 
@@ -1091,6 +1099,10 @@ const App = (() => {
     document.body.classList.toggle('at-gate', gate !== 'ok');
     document.body.classList.toggle('at-dealers', ui.tab === 'dealers');
     $('#ddFrame').hidden = !(ui.tab === 'dealers' || gate !== 'ok');
+    const af = $('#ddAdminFrame'), acc = F.live.account;
+    const showAdmin = gate === 'ok' && ui.tab === 'home' && !!(acc && acc.admin) && ui.adminOpen;
+    if (showAdmin && af.dataset.for !== acc.email) { af.dataset.for = acc.email; af.src = F.adminSrc(); }
+    af.hidden = !showAdmin;
     const root = $('#view');
     if (gate !== 'ok') { root.innerHTML = gateHtml(gate); $$('#tabbar a').forEach(a => a.classList.remove('active')); syncTopbarHeight(); return; }
     const v = VIEWS[ui.tab] || VIEWS.home;
@@ -1104,7 +1116,7 @@ const App = (() => {
      빌드가 없으므로 버전 번호 대신 배포된 파일의 ETag/Last-Modified 를 HEAD 요청으로 2분마다(탭을 다시 볼 때도) 비교한다.
      하나라도 바뀌면 "업데이트가 있습니다. 새로고침을 눌러주세요" 토스트(#updateToast)를 누를 때까지 띄운다 (2026-10-13 사용자 요청).
      file:// 나 HEAD 를 안 받는 서버에서는 도장이 안 찍혀 조용히 아무것도 하지 않는다. */
-  const UPDATE_FILES = ['index.html', 'css/app.css', 'js/store.js', 'js/logic.js', 'js/floor.js', 'js/print.js', 'js/app.js', 'dd/index.html', 'dd/js/app.js', 'dd/js/engine.js', 'dd/js/phoneview.js', 'dd/css/td-theme.css'];
+  const UPDATE_FILES = ['index.html', 'css/app.css', 'js/store.js', 'js/logic.js', 'js/floor.js', 'js/print.js', 'js/app.js', 'dd/index.html', 'dd/js/app.js', 'dd/js/engine.js', 'dd/js/phoneview.js', 'dd/css/embed.css'];
   async function fileStamps() {
     const out = {};
     await Promise.all(UPDATE_FILES.map(async f => {
@@ -1147,7 +1159,7 @@ const App = (() => {
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#board').classList.contains('hidden')) closeBoard(); });
     setInterval(tick, 500);
     ui.bootAt = Date.now(); ui.gate = 'boot'; ui.gateWas = 'boot';
-    $('#ddFrame').src = F.frameSrc(S()); // DD 는 탭과 무관하게 항상 떠 있다 (교대 시계·휴대폰 공유). 로그인 전에는 앱 문 역할
+    $('#ddFrame').src = F.frameSrc(); // DD 는 탭과 무관하게 항상 떠 있다 (교대 시계·휴대폰 공유). 로그인 전에는 앱 문 역할. 어느 이벤트를 열지는 Floor.sync 가 보낸다
     F.onLive(onDdLive);
     if (!S().selectedEventId && S().events.length) Store.patch(st => st.selectedEventId = st.events[0].id);
     render();

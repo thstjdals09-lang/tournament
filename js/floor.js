@@ -57,32 +57,62 @@ const Floor = (() => {
   }
 
   /* ---------- 딜러: dealer-director(DD) 앱을 iframe(#ddFrame, dd/index.html)으로 통째로 띄우고 postMessage 로 잇는다 ----------
-     TD → DD: {td:'dd', type:'tables', open:[번호…]}  Store.commit 마다 열린 테이블 번호 전부 → DD 가 없는 번호는 열고(쉬는 딜러 자동 배치), 사라진 번호는 깬다
-     DD → TD: {dd:'td', type:'state', tables:[{no, dealer, since, feature}], staffing, clock, event, href}  그릴 때마다(바뀐 것만)
-              {dd:'td', type:'page', page:'login'|'list'|…, blocked}  이벤트가 열려 있지 않을 때 (login 이면 앱 전체를 막는다 → gate)
+     TD 이벤트 하나 = DD 이벤트 하나 (id = ddEventId(ev)). 이벤트에 들어가면 DD 가 그 이벤트를 열고(없으면 만들고), 이름도 따라간다.
+     TD → DD: {td:'dd', type:'event', id, name}  지금 이벤트 (바뀔 때)
+              {td:'dd', type:'tables', event, open:[번호…]}  그 이벤트의 열린 테이블 번호 → DD 가 없는 번호는 열고(쉬는 딜러 자동 배치), 사라진 번호는 깬다
+              {td:'dd', type:'deleteEvent', id} · {type:'logout'} · {type:'settings'} · {type:'share'}
+     DD → TD: {dd:'td', type:'state', tables:[{no, dealer, since, feature}], staffing, clock, event, account, blocked}  그릴 때마다(바뀐 것만)
+              {dd:'td', type:'page', page:'login'|'list'|'admin'|…, account, blocked, height}  이벤트가 열려 있지 않을 때 (login 이면 앱 전체를 막는다 → gate)
+     account = {name, email, until, admin} — 홈의 계정 카드와 관리자 계정 발급(admin 일 때만)에 쓴다
      DD 상태는 DD 가 자기 저장소(dealer-director:…)에 들고 있다. 여기 live 는 화면 표시용 사본일 뿐 TD state 에 저장하지 않는다. */
-  const live = { page: null, event: null, tables: [], staffing: null, clock: null, dealers: 0, href: '', room: null, at: 0 };
+  const live = { page: null, event: null, tables: [], staffing: null, clock: null, dealers: 0, room: null, account: null, blocked: null, at: 0 };
   const listeners = [];
   const frame = () => document.getElementById('ddFrame');
+  const adminFrame = () => document.getElementById('ddAdminFrame');
   const ddOrigin = () => (/^https?:$/.test(location.protocol) ? location.origin : '*');
   function post(msg) { const f = frame(); if (!f || !f.contentWindow) return; try { f.contentWindow.postMessage(Object.assign({ td: 'dd' }, msg), ddOrigin()); } catch (e) { /* 아직 안 뜸 */ } }
-  const openNumbers = (s) => Array.from(new Set(s.tables.filter(t => t.status === 'open').map(t => t.number))).sort((a, b) => a - b);
-  /** TD 의 열린 테이블 번호를 DD 에 보낸다. Store.commit 마다 호출 (DD 가 아직 안 떴으면 DD 가 ready 를 보낼 때 다시) */
-  function sync(s) { post({ type: 'tables', open: openNumbers(s) }); }
+  /** TD 이벤트 하나 = DD 이벤트 하나. DD 이벤트 id 는 TD 이벤트 id 로 만든다 (파이어베이스 경로에 쓰이므로 영숫자만) */
+  const ddEventId = (ev) => 'td' + String(ev.id).replace(/[^A-Za-z0-9_-]/g, '');
+  const selected = (s) => s.events.find(e => e.id === s.selectedEventId) || null;
+  const openNumbers = (s, ev) => Array.from(new Set(s.tables.filter(t => t.eventId === ev.id && t.status === 'open').map(t => t.number))).sort((a, b) => a - b);
+  let sentEvent = '', sentTables = '';
+  /** 지금 이벤트(id·이름)와 그 이벤트의 열린 테이블 번호를 DD 에 보낸다. 바뀐 것만 보내므로 commit·patch 마다 불러도 된다. force = DD 가 새로 떴거나 어긋났을 때 */
+  function sync(s, force) {
+    const ev = selected(s);
+    const evSig = ev ? ddEventId(ev) + '|' + ev.name : '';
+    if (force || evSig !== sentEvent) { sentEvent = evSig; if (ev) post({ type: 'event', id: ddEventId(ev), name: ev.name }); }
+    const open = ev ? openNumbers(s, ev) : [];
+    const tSig = ev ? ddEventId(ev) + ':' + open.join(',') : '';
+    if (force || tSig !== sentTables) { sentTables = tSig; if (ev) post({ type: 'tables', event: ddEventId(ev), open }); }
+  }
   function onMessage(e) {
     const m = e.data; if (!m || m.dd !== 'td') return;
     if (ddOrigin() !== '*' && e.origin !== ddOrigin()) return;
-    if (m.type === 'ready' || m.type === 'hello') { if (typeof Store !== 'undefined') sync(Store.get()); return; }
-    if (m.type === 'page') { Object.assign(live, { page: m.page, href: m.href || '', event: null, tables: [], staffing: null, clock: null, blocked: m.blocked || null, at: Date.now() }); }
-    else if (m.type === 'state') { Object.assign(live, { page: m.page, href: m.href || '', event: m.event, tables: m.tables || [], staffing: m.staffing, clock: m.clock, dealers: m.dealers || 0, room: m.room, blocked: m.blocked, at: Date.now() }); if (typeof Store !== 'undefined') sync(Store.get()); }
+    const af = adminFrame();
+    if (af && e.source === af.contentWindow) { // 홈의 계정 관리 iframe: 높이만 맞춘다
+      if (m.type === 'page' && m.height) af.style.height = Math.max(360, m.height + 8) + 'px';
+      return;
+    }
+    if (m.type === 'ready' || m.type === 'hello') { if (typeof Store !== 'undefined') sync(Store.get(), true); return; }
+    if (m.type === 'page') { Object.assign(live, { page: m.page, event: null, tables: [], staffing: null, clock: null, room: null, account: m.account || null, blocked: m.blocked || null, at: Date.now() }); }
+    else if (m.type === 'state') {
+      Object.assign(live, { page: m.page, event: m.event, tables: m.tables || [], staffing: m.staffing, clock: m.clock, dealers: m.dealers || 0, room: m.room, account: m.account || null, blocked: m.blocked || null, at: Date.now() });
+      // DD 가 보여 주는 이벤트·테이블이 TD 와 다르면 다시 맞춘다 (TD 가 기준)
+      if (typeof Store !== 'undefined') {
+        const s = Store.get(), ev = selected(s);
+        if (ev && (!m.event || m.event.id !== ddEventId(ev) || (m.tables || []).map(t => t.no).sort((a, b) => a - b).join(',') !== openNumbers(s, ev).join(','))) sync(s, true);
+      }
+    }
     else return;
     listeners.forEach(fn => fn(live));
   }
   if (typeof window !== 'undefined') window.addEventListener('message', onMessage);
   const onLive = (fn) => listeners.push(fn);
-  /** TD 테이블(id)에 앉은 DD 딜러 {name, since} */
+  /** TD 테이블(id)에 앉은 DD 딜러 {name, since} — DD 가 그 이벤트를 열고 있을 때만 */
   function dealerAt(s, tableId) {
     const t = s.tables.find(x => x.id === tableId); if (!t) return null;
+    const ev = s.events.find(e => e.id === t.eventId);
+    if (!ev || !live.event || live.event.id !== ddEventId(ev)) return null;
     const dt = live.tables.find(x => x.no === t.number);
     return dt && dt.dealer ? { name: dt.dealer, since: dt.since } : null;
   }
@@ -93,9 +123,13 @@ const Floor = (() => {
   const nextPushIn = () => (live.clock && live.clock.running && live.clock.nextPushAt != null) ? live.clock.nextPushAt - (Date.now() + (live.clock.offset || 0)) : null;
   const openSettings = () => post({ type: 'settings' });
   const openShare = () => post({ type: 'share' });
-  /** DD 화면 주소: 마지막으로 열었던 이벤트(?e=…)를 기억해 두고 다시 연다 */
-  const frameSrc = (s) => 'dd/index.html' + ((s.settings && s.settings.ddHref) || '');
+  /** TD 이벤트를 지울 때 DD 이벤트(딜러 기록)도 지운다. 전체 초기화도 이벤트마다 부른다 */
+  const deleteEvent = (ev) => post({ type: 'deleteEvent', id: ddEventId(ev) });
+  const logout = () => post({ type: 'logout' });
+  /** DD 화면 주소. 어느 이벤트를 열지는 sync 가 'event' 메시지로 정한다 */
+  const frameSrc = () => 'dd/index.html';
+  const adminSrc = () => 'dd/index.html?admin';
 
   return { defaultLevels, levels, clockOf, ensure, remain, levelNo, levelLabel, blindText, mmss, currentBB, breakIn, lateRegOpen, start, pause, setLevel, addTime, advance,
-    live, onLive, sync, dealerAt, ddReady, gate, nextPushIn, openSettings, openShare, frameSrc, post };
+    live, onLive, sync, dealerAt, ddEventId, ddReady, gate, nextPushIn, openSettings, openShare, deleteEvent, logout, frameSrc, adminSrc, post };
 })();
