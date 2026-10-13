@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1412">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>딜러 디렉터</title>
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.json" id="manifest">
+  <script>
+    // 딜러 휴대폰에서 '홈 화면에 추가'하면 바로 '내 순서' 화면이 열리도록.
+    // 링크에 방 정보(db, r)가 있으면 그것까지 담는다 — 아이폰은 홈 화면 앱의 저장소가 사파리와 따로라서
+    // 사파리에서 기억해 둔 방 정보를 못 읽기 때문 (정적 manifest-me.json은 ?view=me 까지만)
+    (function () {
+      if (!/[?&]view=me\b/.test(location.search)) return;
+      var link = document.getElementById('manifest');
+      link.href = 'manifest-me.json';
+      if (!/[?&]db=/.test(location.search) || !/[?&]r=/.test(location.search)) return;
+      try {
+        var base = location.href.replace(/[?#].*$/, '').replace(/[^/]*$/, '');
+        var m = {
+          name: '내 딜러 순서', short_name: '내 순서',
+          start_url: location.href.replace(/#.*$/, ''), scope: base,
+          display: 'standalone', background_color: '#0f1412', theme_color: '#0f1412',
+          icons: [{ src: base + 'icons/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }],
+        };
+        link.href = URL.createObjectURL(new Blob([JSON.stringify(m)], { type: 'application/manifest+json' }));
+      } catch (e) { /* 정적 manifest-me.json 그대로 */ }
+    })();
+  </script>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/td-theme.css"><!-- Holdem TD 팔레트 (복사본 전용) -->
+</head>
+<body>
+  <!-- 위쪽 줄: 스크롤해도 항상 보인다 (이벤트 · 탭 · 남은 시간 · 주요 버튼) -->
+  <header class="topbar" id="topbar">
+    <div class="brand">
+      <span class="logo">딜러 디렉터</span>
+      <span class="event-bar" id="eventBar"><b id="eventName"></b><button id="btnEvents" class="mini">이벤트 선택</button></span>
+    </div>
+    <nav class="tabs" id="tabs">
+      <a href="#rotation" data-tab="rotation">진행</a>
+      <a href="#attendance" data-tab="attendance">출퇴근</a>
+      <a href="#notice" data-tab="notice">공지</a>
+    </nav>
+    <div class="push-clock" id="pushClock">
+      <span class="label">다음 교대</span>
+      <span class="countdown" id="countdown">--:--</span>
+      <span class="sub" id="pushAt">로테이션 시작 전</span>
+    </div>
+    <label class="push-every" id="pushEveryBox"
+      title="교대 간격 — 바꾸면 진행 중인 교대 시각을 기준으로 다음 교대가 바로 옮겨집니다">
+      <span>교대 간격</span>
+      <input type="number" id="pushEvery" min="5" max="120" step="1" inputmode="numeric" aria-label="교대 간격(분)">
+      <span>분</span>
+    </label>
+    <div class="controls" id="controls">
+      <button id="btnClock" class="primary">로테이션 시작</button>
+      <button id="btnPush" title="교대 시각을 기다리지 않고 지금 교대">지금 교대</button>
+      <button id="btnRevert" disabled>되돌리기</button>
+      <span class="sep" aria-hidden="true"></span>
+      <button id="btnBoard" title="딜러룸 TV용 화면을 새 창으로">보드</button>
+      <button id="btnShare">딜러 QR</button>
+      <button id="btnSettings">설정</button>
+    </div>
+  </header>
+
+  <div id="accountBar" hidden></div>
+
+  <main id="control">
+    <!-- 진행 화면 맨 위: 입력 줄 (테이블 오픈·빼고·출근·공지) -->
+    <section class="quick" data-page="rotation">
+      <form id="formTables" class="inline-form">
+        <label>테이블 오픈 <input name="nos" placeholder="1-100" autocomplete="off" required></label>
+        <label title="쓰지 않는 테이블 — 이 이벤트에 기억해 두고 다음에 열 때도 뺍니다">빼고 <input name="skip" placeholder="40, 69" autocomplete="off"></label>
+        <label class="chk"><input type="checkbox" name="feature"> 피처</label>
+        <button>오픈</button>
+      </form>
+      <form class="inline-form checkin-form">
+        <label>출근 <input name="names" placeholder="이름 (여러 명은 쉼표로)" autocomplete="off" required></label>
+        <select name="grade" aria-label="등급">
+          <option value="A">A</option>
+          <option value="B" selected>B</option>
+          <option value="C">C</option>
+        </select>
+        <button>출근</button>
+      </form>
+      <form id="formQuickNotice" class="inline-form grow">
+        <label>공지 <input name="text" placeholder="딜러 휴대폰·보드에 보임" autocomplete="off" required></label>
+        <button>등록</button>
+      </form>
+    </section>
+    <div class="notice-bar" id="noticeBar"></div>
+
+    <!-- ===== 진행 (대회 중에 보는 화면) ===== -->
+    <div data-page="rotation">
+      <section class="statline" id="stats"></section>
+      <section class="alerts" id="alerts"></section>
+
+      <div class="ops">
+        <section class="ops-main">
+          <h2>테이블 <small class="muted">칸을 누르면 지정·교체·바로잡기·고정</small></h2>
+          <div class="tables" id="tables"></div>
+        </section>
+        <aside class="ops-side" id="opsSide">
+          <!-- 화면에 붙어 있는(sticky) 상자는 안쪽에 따로 둔다 — 바깥 칸이 자기 줄을 지켜서 로테이션 표 위로 흘러내리지 않게 -->
+          <div class="side-sticky">
+            <section class="side-next">
+              <h2 id="previewTitle">다음 교대</h2>
+              <div id="preview"></div>
+            </section>
+            <section class="side-eo">
+              <h2>퇴근 희망</h2>
+              <div id="eoPanel"></div>
+            </section>
+            <section class="side-pool">
+              <h2>휴식 중 <small class="muted">투입 순서대로</small></h2>
+              <ul class="people" id="pool"></ul>
+            </section>
+          </div>
+        </aside>
+        <section class="ops-sheet">
+          <div class="section-head">
+            <h2>로테이션 표</h2>
+            <div class="seg" role="group" aria-label="표 보기 방식">
+              <button type="button" data-view="dealer">딜러별</button>
+              <button type="button" data-view="table">테이블별</button>
+            </div>
+            <button type="button" id="btnClearPlans" class="mini" hidden>직접 정한 교대 취소</button>
+          </div>
+          <div id="sheet"></div>
+          <p class="legend">노란 테두리 = 그 시각에 자리가 바뀜 · 흐린 열 = 예정 (지금 상태 그대로 갈 경우) · 초록 테두리 = 직접 정한 교대<br>
+            칸을 <b>끌어다 놓거나, 눌러서 고른 뒤 놓을 칸을 누르면</b> 그 교대를 직접 정할 수 있습니다 —
+            예정 칸에서는 같은 시각의 <b>휴식 ↔ 테이블</b>끼리 놓아 <b>휴식을 넘기고</b>, 같은 딜러의 다른 시각에 휴식을 놓아 <b>휴식을 옮깁니다</b>
+            (뒤의 예정이 다시 계산됨). <b>진행 중</b> 칸에서는 아무 칸에나 놓아 <b>지금 당장</b> 자리를 바꿉니다.<br>
+            앉아 있는 딜러는 교대로 다른 테이블에 옮겨 가지 않습니다 — 예정 칸에서 테이블끼리는 바꿀 수 없습니다.</p>
+        </section>
+      </div>
+
+      <details class="log-box">
+        <summary>기록 보기</summary>
+        <ol class="log" id="log"></ol>
+      </details>
+    </div>
+
+    <!-- ===== 출퇴근 ===== -->
+    <div data-page="attendance" hidden>
+      <section class="forms">
+        <form class="inline-form checkin-form">
+          <label>출근 처리 <input name="names" placeholder="이름 (여러 명은 쉼표로)" autocomplete="off" required></label>
+          <select name="grade" aria-label="등급">
+            <option value="A">A</option>
+            <option value="B" selected>B</option>
+            <option value="C">C</option>
+          </select>
+          <button>출근</button>
+        </form>
+        <button id="btnPayroll">근무시간 CSV</button>
+      </section>
+      <section>
+        <h2>출근자 명단 <small class="muted">체크하면 출근 처리, 체크를 풀면 퇴근 처리</small></h2>
+        <form class="inline-form roster-form">
+          <label>명단에 추가 <input name="names" placeholder="이름 (여러 명은 쉼표로)" autocomplete="off" required></label>
+          <select name="grade" aria-label="등급">
+            <option value="A">A</option>
+            <option value="B" selected>B</option>
+            <option value="C">C</option>
+          </select>
+          <button>추가</button>
+        </form>
+        <div id="roster"></div>
+      </section>
+      <section>
+        <h2>오늘 출퇴근</h2>
+        <div id="attendanceList"></div>
+      </section>
+    </div>
+
+    <!-- ===== 공지 ===== -->
+    <div data-page="notice" hidden>
+      <section>
+        <h2>공지 등록 <small class="muted">컨트롤 화면 상단과 딜러룸 보드에 표시</small></h2>
+        <form id="formNotice" class="notice-form">
+          <textarea name="text" rows="3" placeholder="예: 21:00 디너 브레이크 60분 — 20:50까지 전원 복귀" required></textarea>
+          <button class="primary">등록</button>
+        </form>
+      </section>
+      <section>
+        <h2>공지 목록</h2>
+        <ul class="notices" id="notices"></ul>
+      </section>
+    </div>
+
+  </main>
+
+  <!-- ===== 이벤트 목록 (사이트 첫 화면) ===== -->
+  <main id="events" class="events" hidden>
+    <section class="ev-new">
+      <h2>새 이벤트 만들기</h2>
+      <form id="formEvent" class="inline-form">
+        <input name="name" placeholder="이벤트 이름 (예: 10/6 메인 이벤트) — 비우면 날짜로" autocomplete="off">
+        <button class="primary">이벤트 만들기</button>
+        <button type="button" id="btnJoin" title="다른 계정에서 받은 같이 쓰기 코드로 참가">코드로 참가</button>
+      </form>
+      <div id="eventsNote"></div>
+    </section>
+    <section>
+      <h2>이벤트 목록 <small class="muted">이벤트마다 로테이션·출퇴근·기록과 딜러용 링크(QR)가 따로입니다</small></h2>
+      <ul class="ev-list" id="eventList"></ul>
+    </section>
+    <section>
+      <h2>백업 파일</h2>
+      <p class="hint">이벤트는 계정에 자동으로 저장됩니다 — 다른 PC에서는 로그인만 하면 그대로 이어집니다.
+        따로 보관하고 싶을 때 모든 이벤트를 파일 하나로 저장할 수 있습니다.</p>
+      <div class="row-actions">
+        <button type="button" data-act="backup-save">백업 파일 저장</button>
+        <label class="file-btn">백업 파일 불러오기<input type="file" class="backup-file" accept=".json,application/json" hidden></label>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== 로그인 (판매자에게 받은 DD 계정) ===== -->
+  <main id="login" class="login" hidden>
+    <form id="formLogin" class="login-box">
+      <h1>딜러 디렉터</h1>
+      <p class="hint">판매자에게 받은 계정으로 로그인하세요.</p>
+      <label>이메일 <input name="email" type="email" autocomplete="username" required></label>
+      <label>비밀번호 <input name="password" type="password" autocomplete="current-password" required></label>
+      <div id="loginMsg"></div>
+      <button id="btnLogin" class="primary">로그인</button>
+      <button type="button" class="link" data-act="forgot">비밀번호를 잊었어요</button>
+      <p class="hint">한 계정은 한 번에 한 PC에서만 쓸 수 있습니다. 다른 PC에서 로그인하면 먼저 쓰던 PC는 로그아웃되고, 이벤트는 그대로 이어집니다.</p>
+    </form>
+  </main>
+
+  <!-- ===== 관리자 (판매자): DD 계정 만들기·연장·정지 ===== -->
+  <main id="admin" class="admin" hidden>
+    <section class="acc-new">
+      <h2>DD 계정 만들기</h2>
+      <form id="formAccount" class="account-form">
+        <label>업체·이름 <input name="name" maxlength="60" placeholder="예: OO 홀덤펍" required></label>
+        <label>이메일 (로그인 아이디) <input name="email" type="email" autocomplete="off" required></label>
+        <label>비밀번호 <span class="pw-row"><input name="password" autocomplete="off" minlength="6" required>
+          <button type="button" class="mini" data-act="acc-gen">새로 만들기</button></span></label>
+        <label>이용 기간 <span class="pw-row"><select name="months">
+            <option value="1">1개월</option>
+            <option value="3">3개월</option>
+            <option value="6">6개월</option>
+            <option value="12">12개월</option>
+            <option value="0">날짜 지정</option>
+          </select>
+          <input type="date" name="until" hidden></span></label>
+        <button id="btnAccount" class="primary">계정 만들기</button>
+      </form>
+      <div id="accountMade"></div>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2>DD 계정 목록</h2>
+        <button type="button" data-act="acc-reload">새로 고침</button>
+      </div>
+      <p class="hint">기간이 끝나거나 정지하면 몇 분 안에 그 계정의 로그인·공유·저장이 막힙니다 (딜러 휴대폰 화면도 갱신이 멈춤). 연장하면 바로 다시 쓸 수 있습니다.</p>
+      <div id="accountList"></div>
+    </section>
+  </main>
+
+  <main id="board" class="board" hidden></main>
+  <main id="me" class="me" hidden></main>
+
+
+  <dialog id="dlgAssign">
+    <form method="dialog">
+      <h2 id="assignTitle">딜러 지정</h2>
+      <div id="assignBody"></div>
+      <div class="dialog-actions"><button value="close">닫기</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgTimes">
+    <form id="formTimes" method="dialog">
+      <h2 id="timesTitle">출퇴근 시각</h2>
+      <p class="hint">실제로 출근·퇴근한 시각을 적으세요. 출퇴근 탭과 근무시간 CSV에 반영됩니다
+        (로테이션 순서는 실제로 앉고 쉰 시간으로 정해지므로 그대로). 잘못 고쳐도 '되돌리기'로 취소할 수 있습니다.</p>
+      <div id="timesBody"></div>
+      <p class="warn-text" id="timesMsg"></p>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate>취소</button>
+        <button value="save" class="primary">저장</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgTeam">
+    <form id="formTeam" method="dialog">
+      <h2>이벤트 같이 쓰기</h2>
+      <p class="hint">참가 코드를 받은 <b>다른 DD 계정</b>이 같은 이벤트를 열어 <b>함께 조작</b>할 수 있습니다.
+        교대 시계는 PC 한 대만 돌리고, 둘이 거의 동시에 누르면 나중 것이 취소되고 화면이 새로 맞춰집니다.</p>
+      <div id="teamBody"></div>
+      <div class="dialog-actions">
+        <button value="cancel">닫기</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgJoin">
+    <form id="formJoin" method="dialog">
+      <h2>코드로 참가</h2>
+      <p class="hint">같이 쓰기 코드를 받으셨다면 적어 주세요. 그 이벤트가 목록에 들어오고 함께 조작할 수 있습니다.</p>
+      <label>참가 코드 <input id="joinCode" name="code" placeholder="ABCD-EFGH" autocomplete="off" maxlength="20" required></label>
+      <p class="warn-text" id="joinMsg"></p>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate>취소</button>
+        <button value="go" class="primary">참가</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgStart">
+    <form id="formStart" method="dialog">
+      <h2>로테이션 시작</h2>
+      <p class="hint">대회를 이미 시작했는데 지금 앱을 켰다면 <b>실제 시작 시각</b>을 적으세요.
+        그 시각부터 지금까지 교대를 돌린 것으로 로테이션 표가 채워집니다 (하루 전까지).
+        지금 시작하려면 그대로 두세요.</p>
+      <label>시작 시각 <input type="time" id="startAt" name="at" required></label>
+      <p class="warn-text" id="startMsg"></p>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate>취소</button>
+        <button value="go" class="primary">시작</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgTable">
+    <form method="dialog">
+      <h2 id="tableTitle">테이블</h2>
+      <div id="tableBody"></div>
+      <div class="dialog-actions"><button value="close">닫기</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgUndo">
+    <form method="dialog">
+      <h2 id="undoTitle">미투입 처리</h2>
+      <div id="undoBody"></div>
+      <div class="dialog-actions" id="undoActions"></div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgEo">
+    <form method="dialog">
+      <h2 id="eoTitle">퇴근 희망</h2>
+      <div id="eoBody"></div>
+      <div class="dialog-actions" id="eoActions"></div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgShare">
+    <form method="dialog">
+      <h2>딜러용 화면 · 실시간 공유</h2>
+      <div id="shareBody"></div>
+      <div id="shareQr" class="share-qr"></div>
+      <div class="dialog-actions"><button value="close">닫기</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgSettings">
+    <form id="formSettings" method="dialog">
+      <h2>로테이션 설정</h2>
+      <label>교대 간격(분) <input type="number" name="pushMinutes" min="5" max="120" required></label>
+      <label>최대 연속 근무(분, 0 = 제한 없음) <input type="number" name="maxWorkMinutes" min="0" max="600" required></label>
+      <p class="hint">기본은 제한 없음 — 딜러 수가 테이블 수와 같은 날도 경고 없이 돌아가고, 쉴 사람이 생기는 대로 휴식 장부 순서대로 교대합니다.
+        정해 두면 그 시간을 넘긴 딜러를 먼저 쉬게 하고, 넘기면 연장 경고와 권장 인원·조기 퇴근 추천을 보여줍니다.</p>
+      <label>최소 휴식(분) <input type="number" name="minRestMinutes" min="0" max="120" required></label>
+      <label>짧은 근무 기준(분) <input type="number" name="shortSeatMinutes" min="0" max="60" required></label>
+      <p class="hint">짧은 근무 기준보다 적게 앉은 딜러는 교대 대상에서 빠지고, 테이블이 깨져도 쉬지 않고 바로 재투입될 수 있습니다.</p>
+      <label>교대 예고(분 전) <input type="number" name="warnBeforeMinutes" min="0" max="10" required></label>
+      <label class="chk"><input type="checkbox" name="autoPush"> 시간이 되면 자동 교대</label>
+      <label class="chk"><input type="checkbox" name="voice"> 음성 안내</label>
+
+      <h3>백업 파일</h3>
+      <p class="hint">이벤트는 계정에 자동으로 저장됩니다 — PC를 바꿀 때는 새 PC에서 로그인만 하면 됩니다.
+        따로 보관하고 싶을 때 모든 이벤트(테이블·딜러·출퇴근·공지)를 파일 하나로 저장할 수 있습니다.</p>
+      <div class="row-actions">
+        <button type="button" data-act="backup-save">백업 파일 저장</button>
+        <label class="file-btn">백업 파일 불러오기<input type="file" class="backup-file" accept=".json,application/json" hidden></label>
+      </div>
+      <p class="warn-text">백업 파일에는 딜러 이름과 근무 기록이 들어 있습니다. 단체방 등에 올리지 마세요.</p>
+
+      <h3>이 이벤트 초기화</h3>
+      <p class="hint">테이블·딜러 출퇴근·기록·공지를 모두 지웁니다 (다른 이벤트는 그대로). 잘못 눌렀으면 '되돌리기'로 살릴 수 있습니다.</p>
+      <div class="row-actions"><button type="button" id="btnReset" class="danger">이 이벤트 초기화</button></div>
+
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate>취소</button>
+        <button value="save" class="primary">저장</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgPw">
+    <form id="formPw" method="dialog">
+      <h2>비밀번호 바꾸기</h2>
+      <label>지금 비밀번호 <input type="password" name="cur" autocomplete="current-password" required></label>
+      <label>새 비밀번호 (6자 이상) <input type="password" name="next" autocomplete="new-password" minlength="6" required></label>
+      <label>새 비밀번호 한 번 더 <input type="password" name="next2" autocomplete="new-password" minlength="6" required></label>
+      <p class="warn-text" id="pwMsg"></p>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate>취소</button>
+        <button value="save" class="primary">바꾸기</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 다른 PC 로그인 · 이용 기간 끝 · 불러오는 중 — 화면 전체를 덮는다 -->
+  <div class="gate" id="gate" hidden></div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="js/engine.js"></script>
+  <script src="js/phoneview.js"></script>
+  <script src="js/events.js"></script>
+  <script src="js/account.js"></script>
+  <script src="js/sync.js"></script>
+  <script src="js/backup.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

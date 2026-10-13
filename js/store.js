@@ -23,11 +23,25 @@ const Store = (() => {
     };
   }
 
+  /** 설정 탭 기본값 (현장 공통). 이벤트별 설정은 event 객체에 있다 */
+  function defaultSettings() {
+    return {
+      // 레지
+      autoPrintOnRegister: true, regPhone: 'show', regMemo: true, dupWarn: true, seatPickAllowed: true, seatMode: 'random',
+      // 테이블
+      defaultSeats: 9, autoOpenTable: true, balanceDiff: 2, breakHint: true, askKO: true, prizeSheet: true,
+      // 클락
+      levelBeep: true, warnBeforeMin: 0, boardAvg: true, boardPool: true, boardFirst: true, boardBreak: true,
+      // 딜러 (DD iframe 이 마지막으로 열었던 이벤트 주소 '?e=…')
+      ddHref: '',
+    };
+  }
+
   function defaultState() {
     return {
       selectedEventId: null,
       events: [], players: [], tables: [], vouchers: [],
-      settings: { autoPrintOnRegister: true, defaultSeats: 9, autoOpenTable: true },
+      settings: defaultSettings(),
       templates: defaultTemplates(),
     };
   }
@@ -40,8 +54,16 @@ const Store = (() => {
       s.templates = Object.assign(defaultTemplates(), s.templates || {});
       s.templates.confirm = Object.assign(defaultTemplates().confirm, s.templates.confirm);
       s.templates.voucher = Object.assign(defaultTemplates().voucher, s.templates.voucher);
-      return s;
+      return migrate(s);
     } catch (e) { console.warn('load fail', e); return defaultState(); }
+  }
+
+  /** 예전 데이터 보정: 새 설정 기본값 채우기, 없앤 '테이블 사용 설정'(disabledTables) 지우기 */
+  function migrate(s) {
+    s.settings = Object.assign(defaultSettings(), s.settings || {});
+    (s.events || []).forEach(e => { delete e.disabledTables; });
+    delete s.dd; // 예전에 TD 안에 넣어 두던 DD 엔진 상태 — 이제 DD 앱(dd/)이 자기 저장소에 둔다
+    return s;
   }
 
   let state = load();
@@ -55,6 +77,7 @@ const Store = (() => {
     const snap = clone(state);
     const result = fn(state);
     if (result === false) return false;         // 취소
+    if (typeof Floor !== 'undefined') Floor.sync(state); // 열리고 닫힌 테이블을 딜러 엔진(DD)에 반영 → 딜러 자동 배치
     past.push({ label, snap });
     if (past.length > MAX_HISTORY) past.shift();
     future = [];
@@ -83,9 +106,9 @@ const Store = (() => {
     const s = JSON.parse(text);
     if (!s || !Array.isArray(s.events)) throw new Error('형식이 올바르지 않습니다');
     past.push({ label: '데이터 가져오기', snap: clone(state) }); future = [];
-    state = Object.assign(defaultState(), s); save(); emit();
+    state = migrate(Object.assign(defaultState(), s)); save(); emit();
   }
   function reset() { past.push({ label: '전체 초기화', snap: clone(state) }); future = []; state = defaultState(); save(); emit(); }
 
-  return { get: () => state, commit, patch, undo, redo, canUndo, canRedo, undoLabel, redoLabel, subscribe, uid, clone, exportJSON, importJSON, reset };
+  return { defaultSettings, get: () => state, commit, patch, undo, redo, canUndo, canRedo, undoLabel, redoLabel, subscribe, uid, clone, exportJSON, importJSON, reset };
 })();

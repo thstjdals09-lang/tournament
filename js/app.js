@@ -1,8 +1,12 @@
 /* UI 렌더링 & 이벤트 바인딩
-   탭 역할: 등록 = 등록 폼 + 좌석 번호·테이블 사용 설정 + 등록자 관리
+   첫 화면 = 이벤트 목록(home). 이벤트에 들어가면 아래 탭
+   탭 역할: 등록 = 등록 폼 + 등록자 관리 (등록만)
            테이블 = 테이블·플레이어 조작 (정렬/검색/필터)
-           이벤트 = 이벤트 CRUD + 현황판 + 상금 구조 + 순위표
-           용지 = 템플릿·바우처·데이터 */
+           클락 = 이벤트별 블라인드 클락·구조 편집·전광판
+           딜러 = dealer-director 앱 통째로 (iframe dd/index.html, 테이블 열림/닫힘을 postMessage 로 전달)
+           현황 = 현황판 + 상금 구조 + 순위표
+           용지 = 바우처 발행·발행 내역
+           설정 = 레지/테이블/클락/딜러/현황/용지 별 세부 설정 (좌석 번호 사용은 테이블 모양) */
 const App = (() => {
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
@@ -12,14 +16,15 @@ const App = (() => {
   const money = Print.fmtMoney;
 
   const ui = {
-    tab: (location.hash || '#reg').slice(1),
+    tab: (location.hash || '#home').slice(1),
     regForm: { name: '', phone: '', buyIn: '', memo: '' },
     regSeat: null, regSearch: '',
     moveMode: null,           // { playerId }
     tblSort: 'numAsc',        // numAsc | numDesc | cntAsc | cntDesc
     tblFilter: 'all',         // all | open | empty | over | under | closed
     tblSearch: '',
-    eventEdit: null,          // event id | 'new'
+    eventEdit: null,          // 'new' = 홈에서 새 이벤트 폼 열림 (수정은 설정 > 현황)
+    setSec: 'reg',            // 설정 탭: reg | table | clock | dealer | event | paper
     eventSection: 'board',    // board | payouts | ranks
     printTab: 'confirm',
     voucherForm: { playerId: '', amount: '', note: '' },
@@ -32,22 +37,31 @@ const App = (() => {
     const el = $('#toast'); el.textContent = msg; el.classList.add('show');
     clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), ms || 2200);
   }
+  let sheetSeq = 0; // 시트 버튼이 다른 시트를 열면(예: 이동 → 테이블 선택) 새 시트를 닫지 않도록 구분
   function sheet(title, actions, bodyHtml, onBind) {
-    const el = $('#sheet');
+    const el = $('#sheet'); const seq = ++sheetSeq;
     el.innerHTML = `<div class="sheet-body"><h3>${h(title)}</h3>${bodyHtml || ''}<div class="sheet-actions">${actions.map((a, i) => `<button class="${a.cls || ''}" data-i="${i}">${a.label}</button>`).join('')}<button class="ghost" data-i="-1">닫기</button></div></div>`;
     el.classList.remove('hidden');
     el.onclick = (e) => {
       if (e.target === el) { closeSheet(); return; }
       const b = e.target.closest('button[data-i]'); if (!b) return;
-      const i = +b.dataset.i; const keep = i >= 0 && actions[i].fn(el) === 'keep'; if (!keep) closeSheet();
+      const i = +b.dataset.i; const keep = i >= 0 && actions[i].fn(el) === 'keep'; if (!keep && sheetSeq === seq) closeSheet();
     };
     if (onBind) onBind(el);
   }
   function closeSheet() { const el = $('#sheet'); el.classList.add('hidden'); el.innerHTML = ''; }
+  /** 테이블 오픈 안내 뒤에 붙는 자동 배치 딜러 문구 */
+  /** 테이블 오픈 안내 뒤에 붙는 딜러 문구. DD 가 답을 보내면(비동기) 따로 토스트가 뜨므로 여기서는 연결 여부만 */
+  const dealerNote = () => (F.ddReady() ? '' : (F.live.page ? ' · DD 이벤트를 열면 딜러가 배치됩니다' : ''));
   const tableName = (s, id) => { const t = L.tableOf(s, id); return t ? 'T' + t.number : '-'; };
   const seatLabel = (s, p) => p.status === 'active' ? `${tableName(s, p.tableId)} S${p.seat}` : `탈락 ${p.finishRank}위`;
   function noEventHtml() { return `<div class="card"><h2>이벤트가 없습니다</h2><p class="muted">먼저 이벤트를 만들어야 등록과 테이블 관리를 할 수 있습니다.</p><button class="primary" id="btnGoEvents">이벤트 만들기</button></div>`; }
-  function bindNoEvent(root) { const b = $('#btnGoEvents', root); if (b) b.addEventListener('click', () => { ui.eventEdit = 'new'; location.hash = '#events'; }); }
+  function bindNoEvent(root) { const b = $('#btnGoEvents', root); if (b) b.addEventListener('click', () => { ui.eventEdit = 'new'; location.hash = '#home'; }); }
+  /** 이벤트 목록에서 들어가기: 그 이벤트를 선택하고 등록 탭으로 */
+  function enterEvent(id) {
+    Store.patch(st => st.selectedEventId = id); ui.regSeat = null; ui.moveMode = null; ui.eventEdit = null;
+    if (location.hash === '#reg') render(); else location.hash = '#reg';
+  }
 
   /* ---------- 상단 바 ---------- */
   function renderTop() {
@@ -65,26 +79,52 @@ const App = (() => {
     const info = L.balanceInfo(s, ev.id);
     const tables = L.openTables(s, ev.id).length;
     bar.innerHTML = `
+      <a class="chip clk-chip" href="#clock" data-clk="chip"></a>
       <span class="chip">참가<b>${all.length}</b></span>
       <span class="chip">탈락<b>${busted}</b></span>
       <span class="chip ok">남은<b>${active.length}</b></span>
       <span class="chip">테이블<b>${tables}</b></span>
       ${tables ? (info.need ? `<span class="chip bad">밸런싱 필요 (${info.min}~${info.max})</span>` : `<span class="chip ok">균형 양호</span>`) : ''}
-      ${info.canBreak ? `<span class="chip warn">T${info.breakTable.number} 브레이크 가능</span>` : ''}`;
+      ${info.canBreak && s.settings.breakHint !== false ? `<span class="chip warn">T${info.breakTable.number} 브레이크 가능</span>` : ''}`;
   }
 
-  function askOpenTable(eventId) {
+  /* ---------- 앱 안의 확인창 (#dlg) ----------
+     브라우저 confirm/prompt 대신 쓴다 — 미리보기(아티팩트)나 일부 임베드 환경에서는 브라우저 확인창이 막혀 버튼이 눌려도 아무 일도 안 생긴다(2026-10-13 제보).
+     ask({title, text, fields:[{name,label,value,type}], ok, cancel, danger}) → Promise: 취소면 null, 입력칸 없으면 true, 있으면 {name: 값}
+     시험용 갈고리: ui.autoAnswer = (opts) => 답  (헤드리스 점검 스크립트가 쓴다) */
+  function ask(opts) {
+    const o = Object.assign({ ok: '확인', cancel: '취소', fields: [] }, typeof opts === 'string' ? { text: opts } : opts);
+    const val = () => o.fields.length ? Object.fromEntries(o.fields.map(f => [f.name, String($(`#dlg [name="${f.name}"]`).value)])) : true;
+    if (ui.autoAnswer) return Promise.resolve(ui.autoAnswer(o));
+    const d = $('#dlg');
+    d.querySelector('.dlg-title').textContent = o.title || ''; d.querySelector('.dlg-title').hidden = !o.title;
+    d.querySelector('.dlg-text').innerHTML = o.text ? h(o.text).replace(/\n/g, '<br>') : ''; d.querySelector('.dlg-text').hidden = !o.text;
+    d.querySelector('.dlg-fields').innerHTML = o.fields.map(f => `<label>${f.label ? `<span>${h(f.label)}</span>` : ''}<input name="${f.name}" type="${f.type || 'text'}" value="${h(f.value == null ? '' : String(f.value))}" ${f.placeholder ? `placeholder="${h(f.placeholder)}"` : ''} autocomplete="off"></label>`).join('');
+    const okB = d.querySelector('[value=ok]'), ccB = d.querySelector('.dlg-cancel'); // 취소는 type=button — 입력칸에서 Enter 가 첫 submit 버튼(취소)으로 가지 않게
+    okB.textContent = o.ok; okB.className = o.danger ? 'danger' : 'primary'; ccB.textContent = o.cancel; ccB.hidden = o.cancel === false;
+    return new Promise(resolve => {
+      const done = () => { d.removeEventListener('close', done); resolve(d.returnValue === 'ok' ? val() : null); };
+      d.addEventListener('close', done);
+      d.returnValue = ''; d.showModal();
+      const first = d.querySelector('input'); if (first) { first.focus(); first.select(); } else okB.focus();
+    });
+  }
+  const confirmBox = (text, ok, danger) => ask({ text, ok: ok || '확인', danger }).then(v => v !== null);
+  const promptBox = (text, value, ok) => ask({ text, ok: ok || '확인', fields: [{ name: 'v', value }] }).then(v => v && v.v);
+
+  async function askOpenTable(eventId) {
     const s = S(); const ev = L.eventOf(s, eventId);
     const next = L.nextTableNumber(s, ev);
-    const ans = prompt(`열 테이블 번호 (범위 ${ev.tableStart || 1}~${ev.tableEnd || '제한 없음'}, 비우면 자동 ${next ? 'T' + next : '없음'})`, '');
-    if (ans === null) return;
+    const ans = await promptBox(`열 테이블 번호 (범위 ${ev.tableStart || 1}~${ev.tableEnd || '제한 없음'}, 비우면 자동 ${next ? 'T' + next : '없음'})`, '', '테이블 열기');
+    if (ans == null) return;
     let r; Store.commit('새 테이블 오픈', st => { r = L.openTable(st, eventId, { number: +ans || 0 }); if (r.error) return false; });
-    if (r.error) toast(r.error); else toast(`T${r.number} 오픈 (되돌리기 가능)`);
+    if (r.error) toast(r.error); else toast(`T${r.number} 오픈${dealerNote(r)} (되돌리기 가능)`);
   }
 
   /* ---------- 등록 탭 ---------- */
   function ensureRegSeat() {
     const ev = curEvent(); if (!ev) { ui.regSeat = null; return; }
+    if (S().settings.seatPickAllowed === false) ui.seatPick = false;
     if (!ui.seatPick) { ui.regSeat = null; return; }
     const s = S();
     if (ui.regSeat) {
@@ -96,64 +136,41 @@ const App = (() => {
   function viewReg() {
     const s = S(); const ev = curEvent();
     if (!ev) return noEventHtml();
+    const set = s.settings;
     ensureRegSeat();
     const f = ui.regForm;
     const tables = L.openTables(s, ev.id);
     const all = L.eventPlayers(s, ev.id);
     const q = ui.regSearch.trim().toLowerCase();
     const list = all.filter(p => !q || p.name.toLowerCase().includes(q) || String(p.entryNo) === q || (p.phone || '').includes(q)).sort((a, b) => b.registeredAt - a.registeredAt);
-    const dupe = f.name.trim() && all.some(p => p.name.trim().toLowerCase() === f.name.trim().toLowerCase());
-    const offSet = new Set(ev.disabledSeats || []);
-    const offTables = new Set(ev.disabledTables || []);
+    const dupe = set.dupWarn !== false && f.name.trim() && all.some(p => p.name.trim().toLowerCase() === f.name.trim().toLowerCase());
     const strays = L.playersOnDisabledSeats(s, ev.id);
     const manualTables = tables.filter(t => L.tableUsable(t) && L.emptySeats(s, t).length).sort((a, b) => a.number - b.number);
     const manualT = ui.regSeat ? L.tableOf(s, ui.regSeat.tableId) : manualTables[0];
-    const tStart = ev.tableStart || 1;
-    const lastOpen = L.openTables(s, ev.id).slice(-1)[0];
-    const tEnd = ev.tableEnd || Math.max(tStart + 19, (lastOpen ? lastOpen.number : tStart) + 5);
-    const numbers = []; for (let n = tStart; n <= tEnd && numbers.length < 200; n++) numbers.push(n);
+    const late = Floor.lateRegOpen(ev);
+    const phone = set.regPhone || 'show';
     return `
+    ${late === false ? `<div class="banner ${ev.lateRegBlock ? 'bad' : 'warn'}"><span class="grow">레이트 레지 마감 (레벨 ${ev.lateRegLevel} 종료)${ev.lateRegBlock ? ' · 등록이 막혀 있습니다. 설정 &gt; 레지에서 바꿀 수 있습니다' : ''}</span></div>` : ''}
+    ${strays.length ? `<div class="banner warn"><span class="grow">사용 안함 좌석에 앉아있는 플레이어 ${strays.length}명: ${strays.slice(0, 5).map(p => h(p.name) + ' (' + tableName(s, p.tableId) + ' S' + p.seat + ')').join(', ')}${strays.length > 5 ? ' 외' : ''} · 테이블 탭에서 이동시켜 주세요</span></div>` : ''}
     <div class="card">
-      <h2>등록 <span class="muted small">${h(ev.name)}${ev.status === 'closed' ? ' · 종료된 이벤트' : ''}</span></h2>
+      <div class="row tight" style="margin-bottom:8px"><h2 style="margin:0">등록 <span class="muted small">${h(ev.name)}${ev.status === 'closed' ? ' · 종료된 이벤트' : ''}</span></h2><span style="flex:1"></span><a class="btn-link sm" href="#settings" data-gosec="reg">레지 설정</a></div>
       <form id="regForm" autocomplete="off">
         <div class="row">
           <label class="field"><span>이름 *</span><input name="name" value="${h(f.name)}" required placeholder="플레이어 이름" autofocus>${dupe ? '<span class="small warn-text">같은 이름이 이미 등록되어 있습니다. 리엔트리라면 메모에 표시하세요.</span>' : ''}</label>
-          <label class="field"><span>연락처</span><input name="phone" value="${h(f.phone)}" placeholder="선택"></label>
+          ${phone !== 'hide' ? `<label class="field"><span>연락처${phone === 'required' ? ' *' : ''}</span><input name="phone" value="${h(f.phone)}" placeholder="${phone === 'required' ? '필수' : '선택'}" ${phone === 'required' ? 'required' : ''}></label>` : ''}
         </div>
-        <div class="row">
-          <label class="field"><span>메모</span><input name="memo" value="${h(f.memo)}" placeholder="리엔트리, 애드온 등"></label>
-        </div>
-        <div class="assign-box">
+        ${set.regMemo !== false ? `<div class="row"><label class="field"><span>메모</span><input name="memo" value="${h(f.memo)}" placeholder="리엔트리, 애드온 등"></label></div>` : ''}
+        ${set.seatPickAllowed !== false ? `<div class="assign-box">
           <label class="chk"><input type="checkbox" id="chkSeatPick" ${ui.seatPick ? 'checked' : ''} ${manualTables.length ? '' : 'disabled'}>좌석 지정</label>
           ${ui.seatPick && manualTables.length ? `
             <select id="manTable" class="sm-select">${manualTables.map(t => `<option value="${t.id}" ${manualT && manualT.id === t.id ? 'selected' : ''}>T${t.number} (${L.tablePlayers(s, t.id).length}/${L.usableSeats(s, t)})</option>`).join('')}</select>
             <select id="manSeat" class="sm-select">${(manualT ? L.emptySeats(s, manualT) : []).map(n => `<option value="${n}" ${ui.regSeat && ui.regSeat.seat === n ? 'selected' : ''}>S${n}</option>`).join('')}</select>`
-            : '<span class="small muted">지정하지 않으면 빈 좌석 중 무작위로 배정됩니다</span>'}
-        </div>
+            : `<span class="small muted">지정하지 않으면 ${set.seatMode === 'order' ? '번호가 낮은 테이블·좌석부터' : '빈 좌석 중 무작위로'} 배정됩니다</span>`}
+        </div>` : ''}
         <div class="row">
-          <button type="submit" class="primary" data-print="1">등록 + 확인증 인쇄</button>
-          <button type="submit" class="ghost" data-print="0">등록만</button>
+          ${set.autoPrintOnRegister !== false ? `<button type="submit" class="primary" data-print="1">등록 + 확인증 인쇄</button><button type="submit" class="ghost" data-print="0">등록만</button>` : `<button type="submit" class="primary" data-print="0">등록</button><button type="submit" class="ghost" data-print="1">등록 + 확인증 인쇄</button>`}
         </div>
       </form>
-    </div>
-
-    <div class="card">
-      <div class="row tight" style="margin-bottom:6px"><h3 style="margin:0">좌석 번호 사용 설정</h3><span class="muted small">이 이벤트의 모든 테이블 공통 · 체크 해제한 번호에는 배정하지 않습니다</span></div>
-      <div class="seatnums">${Array.from({ length: ev.seats }, (_, i) => i + 1).map(n => `<label class="seatnum ${offSet.has(n) ? 'off' : ''}"><input type="checkbox" ${offSet.has(n) ? '' : 'checked'} data-evseat="${n}"><span>${n}</span></label>`).join('')}</div>
-      ${strays.length ? `<div class="banner warn" style="margin:10px 0 0"><span class="grow">사용 안함 좌석에 앉아있는 플레이어 ${strays.length}명: ${strays.slice(0, 5).map(p => h(p.name) + ' (' + tableName(s, p.tableId) + ' S' + p.seat + ')').join(', ')}${strays.length > 5 ? ' 외' : ''} — 테이블 탭에서 이동시켜 주세요.</span></div>` : ''}
-    </div>
-
-    <div class="card">
-      <div class="row tight" style="margin-bottom:6px"><h3 style="margin:0">테이블 사용 설정</h3><span class="muted small">이 이벤트 범위 T${tStart}~${ev.tableEnd || '제한 없음'} · 체크 해제한 번호는 열리지 않습니다 · 이미 열린 테이블은 변경 불가</span><span style="flex:1"></span><button class="sm ghost" id="btnOpenTableReg">테이블 열기</button></div>
-      <div class="tbl-toggle-grid">${numbers.map(n => {
-        const t = tables.find(x => x.number === n);
-        const other = !t && L.usedTableNumbers(s).has(n);
-        const off = offTables.has(n);
-        const locked = !!t || other;
-        return `<label class="tbl-toggle ${off ? 'off' : ''} ${locked ? 'locked' : ''}" title="${other ? '다른 이벤트에서 사용 중' : (t ? '열려 있는 테이블입니다' : '')}">
-          <input type="checkbox" ${off ? '' : 'checked'} ${locked ? 'disabled' : ''} data-evtable="${n}"><b>T${n}</b>
-          <span class="muted small">${t ? L.tablePlayers(s, t.id).length + '/' + L.usableSeats(s, t) : (other ? '타 이벤트' : (off ? '사용안함' : '대기'))}</span></label>`;
-      }).join('')}</div>
     </div>
 
     <div class="card">
@@ -165,6 +182,7 @@ const App = (() => {
   }
   function bindReg(root) {
     const form = $('#regForm', root); if (!form) { bindNoEvent(root); return; }
+    bindGoSec(root);
     form.addEventListener('input', () => { const fd = new FormData(form); ['name', 'phone', 'buyIn', 'memo'].forEach(k => ui.regForm[k] = fd.get(k) || ''); });
     let printFlag = true;
     $$('button[type=submit]', form).forEach(b => b.addEventListener('click', () => printFlag = b.dataset.print === '1'));
@@ -172,33 +190,30 @@ const App = (() => {
       e.preventDefault();
       const ev = curEvent(); const data = Object.assign({}, ui.regForm);
       if (!data.name.trim()) { toast('이름을 입력하세요'); return; }
+      if (S().settings.regPhone === 'required' && !data.phone.trim()) { toast('연락처를 입력하세요'); return; }
+      if (ev.lateRegBlock && Floor.lateRegOpen(ev) === false) { toast('레이트 레지가 마감되어 등록할 수 없습니다 (설정 > 레지)'); return; }
       let res;
       Store.commit('등록: ' + data.name, st => { res = L.register(st, ev.id, data, ui.regSeat); if (res.error) return false; });
       if (res.error) { toast(res.error); return; }
       const p = res.player; const st = S();
-      toast(`#${p.entryNo} ${p.name} → ${tableName(st, p.tableId)} S${p.seat}${res.openedTable ? ' (새 테이블 오픈)' : ''}`);
+      toast(`#${p.entryNo} ${p.name} → ${tableName(st, p.tableId)} S${p.seat}${res.openedTable ? ` (새 테이블 T${res.openedTable.number} 오픈${dealerNote(res.openedTable)})` : ''}`, 3500);
       ui.regForm = { name: '', phone: '', buyIn: '', memo: '' }; ui.regSeat = null; ui.seatPick = false;
       render();
-      if (printFlag && st.settings.autoPrintOnRegister !== false) printConfirm(p.id);
+      if (printFlag) printConfirm(p.id);
       const n = $('#regForm input[name=name]'); if (n) n.focus();
     });
-    $('#chkSeatPick', root).addEventListener('change', (e) => { ui.seatPick = e.target.checked; if (!ui.seatPick) ui.regSeat = null; render(); });
+    const sp = $('#chkSeatPick', root); if (sp) sp.addEventListener('change', (e) => { ui.seatPick = e.target.checked; if (!ui.seatPick) ui.regSeat = null; render(); });
     const mt = $('#manTable', root), ms = $('#manSeat', root);
     if (mt) {
       mt.addEventListener('change', () => { const t = L.tableOf(S(), mt.value); const e = L.emptySeats(S(), t); ui.regSeat = e.length ? { tableId: t.id, seat: e[0] } : null; render(); });
       ms.addEventListener('change', () => { ui.regSeat = { tableId: mt.value, seat: +ms.value }; render(); });
     }
-    $('#btnOpenTableReg', root).addEventListener('click', () => askOpenTable(curEvent().id));
-    $$('input[data-evseat]', root).forEach(cb => cb.addEventListener('change', () => {
-      Store.commit('좌석 번호 사용 변경', st => L.toggleEventSeat(st, curEvent().id, +cb.dataset.evseat));
-    }));
-    $$('input[data-evtable]', root).forEach(cb => cb.addEventListener('change', () => {
-      Store.commit('테이블 사용 변경', st => L.toggleEventTable(st, curEvent().id, +cb.dataset.evtable));
-    }));
     const search = $('#regSearch', root);
     search.addEventListener('input', () => { ui.regSearch = search.value; const pos = search.selectionStart; render(); const s2 = $('#regSearch'); s2.focus(); s2.setSelectionRange(pos, pos); });
     $$('[data-pmenu]', root).forEach(b => b.addEventListener('click', () => regPlayerSheet(b.dataset.pmenu)));
   }
+  /** 다른 탭에서 설정 탭의 특정 칸으로 바로 가는 링크 */
+  function bindGoSec(root) { $$('[data-gosec]', root).forEach(a => a.addEventListener('click', () => { ui.setSec = a.dataset.gosec; })); }
   function regPlayerSheet(pid) {
     const s = S(); const p = L.playerOf(s, pid); if (!p) return;
     const actions = [
@@ -209,17 +224,16 @@ const App = (() => {
       ui.regForm = { name: p.name, phone: p.phone || '', buyIn: '', memo: '리엔트리' }; ui.regSeat = null; render();
       const n = $('#regForm input[name=name]'); if (n) n.focus(); toast('폼에 채웠습니다. 등록 버튼을 누르세요');
     } });
-    actions.push({ label: '등록 취소 (삭제)', cls: 'danger', fn: () => {
-      if (confirm(`#${p.entryNo} ${p.name} 등록을 취소(삭제)할까요?`)) { Store.commit('등록 취소: ' + p.name, st => L.cancelRegistration(st, p.id)); toast('등록 취소됨 (되돌리기 가능)'); }
+    actions.push({ label: '등록 취소 (삭제)', cls: 'danger', fn: async () => {
+      if (await confirmBox(`#${p.entryNo} ${p.name} 등록을 취소(삭제)할까요?`, '등록 취소', true)) { Store.commit('등록 취소: ' + p.name, st => L.cancelRegistration(st, p.id)); toast('등록 취소됨 (되돌리기 가능)'); }
     } });
     sheet(`#${p.entryNo} ${p.name} · ${seatLabel(s, p)}`, actions, `<div class="muted small" style="margin-bottom:10px">${p.phone ? h(p.phone) + ' · ' : ''}${p.memo ? h(p.memo) + ' · ' : ''}${Print.fmtTime(p.registeredAt)} 등록</div>`);
   }
-  function editPlayer(pid) {
+  async function editPlayer(pid) {
     const p = L.playerOf(S(), pid); if (!p) return;
-    const name = prompt('이름', p.name); if (name === null) return;
-    const phone = prompt('연락처', p.phone || ''); if (phone === null) return;
-    const memo = prompt('메모', p.memo || ''); if (memo === null) return;
-    Store.commit('정보 수정: ' + p.name, st => { const x = L.playerOf(st, pid); x.name = name.trim() || x.name; x.phone = phone.trim(); x.memo = memo.trim(); });
+    const v = await ask({ title: `#${p.entryNo} 정보 수정`, ok: '저장', fields: [{ name: 'name', label: '이름', value: p.name }, { name: 'phone', label: '연락처', value: p.phone || '', type: 'tel' }, { name: 'memo', label: '메모', value: p.memo || '' }] });
+    if (!v) return;
+    Store.commit('정보 수정: ' + p.name, st => { const x = L.playerOf(st, pid); x.name = v.name.trim() || x.name; x.phone = v.phone.trim(); x.memo = v.memo.trim(); });
     toast('저장됨');
   }
   function printConfirm(playerId) {
@@ -252,7 +266,7 @@ const App = (() => {
     }
     const open = t.status === 'open';
     return `<div class="table-card ${open ? '' : 'closed'} ${!usable && open ? 'disabled' : ''}" data-tcard="${t.id}" id="tcard-${t.number}">
-      <div class="table-head"><span class="name">T${t.number}</span><span class="cnt">${players.length}/${L.usableSeats(s, t)}</span>${open ? (usable ? '' : '<span class="chip warn">사용 안함</span>') : '<span class="chip">닫힘</span>'}<span class="sp"></span>
+      <div class="table-head"><span class="name">T${t.number}</span><span class="cnt">${players.length}/${L.usableSeats(s, t)}</span>${open ? (() => { const dl = Floor.dealerAt(s, t.id); return `<span class="chip ${dl ? '' : 'warn'}">${dl ? '딜러 ' + h(dl.name) : '딜러 없음'}</span>`; })() : ''}${open ? (usable ? '' : '<span class="chip warn">사용 안함</span>') : '<span class="chip">닫힘</span>'}<span class="sp"></span>
         ${open ? `<button class="sm ghost" data-close="${t.id}">브레이크</button>` : `<button class="sm ghost" data-reopen="${t.id}">다시 열기</button><button class="sm ghost" data-deltable="${t.id}">삭제</button>`}
       </div>
       <div class="seats">${seats}</div></div>`;
@@ -289,7 +303,7 @@ const App = (() => {
       banner = `<div class="banner warn"><span class="grow"><b>${h(p ? p.name : '')}</b> 이동 중 — 목적지 좌석을 탭하거나 아래 버튼으로 테이블을 선택하세요 (플레이어가 있으면 자리 교환)</span><button class="sm" id="btnMoveSelect">테이블 선택</button><button class="sm ghost" id="btnCancelMove">취소</button></div>`;
     } else if (info.need) {
       banner = `<div class="banner bad"><span class="grow">테이블 인원 편차 ${info.max - info.min} (최소 ${info.min} / 최대 ${info.max}) — 밸런싱이 필요합니다</span><button class="sm warn" id="btnAutoBalance">자동 밸런싱</button></div>`;
-    } else if (info.canBreak) {
+    } else if (info.canBreak && s.settings.breakHint !== false) {
       banner = `<div class="banner warn"><span class="grow">T${info.breakTable.number}을(를) 브레이크해도 전원 수용 가능합니다 (남은 ${info.active}명)</span><button class="sm" data-close="${info.breakTable.id}">T${info.breakTable.number} 브레이크</button></div>`;
     } else if (info.tables.length) {
       banner = `<div class="banner ok"><span class="grow">테이블 균형 양호 · 남은 ${info.active}명 / ${info.tables.length}테이블 · 평균 ${avg.toFixed(1)}명</span></div>`;
@@ -306,6 +320,9 @@ const App = (() => {
       <div class="row tight">
         <button class="primary sm" id="btnOpenTable">새 테이블</button>
         <button class="sm" id="btnAutoBalance2" ${info.need ? '' : 'disabled'}>자동 밸런싱</button>
+        <button class="sm" id="btnOpenBalance">새 테이블 + 밸런싱</button>
+        <button class="sm" id="btnCombine" ${allOpen.length > 1 ? '' : 'disabled'}>컨바인</button>
+        <button class="sm danger" id="btnQuickBust" ${allOpen.length ? '' : 'disabled'}>빠른 탈락</button>
         <input id="tblSearch" placeholder="플레이어 이름 / 엔트리번호 / 테이블번호" value="${h(ui.tblSearch)}" style="flex:1;min-width:180px">
       </div>
       <div class="row tight" style="margin-top:8px">
@@ -327,6 +344,9 @@ const App = (() => {
     if (!curEvent()) { bindNoEvent(root); return; }
     const ev = curEvent();
     $('#btnOpenTable', root).addEventListener('click', () => askOpenTable(ev.id));
+    $('#btnOpenBalance', root).addEventListener('click', () => doOpenBalance(ev.id));
+    $('#btnCombine', root).addEventListener('click', () => combineSheet(ev.id));
+    $('#btnQuickBust', root).addEventListener('click', () => quickBustSheet(ev.id));
     $('#btnTools', root).addEventListener('click', () => { ui.tblToolsOpen = !ui.tblToolsOpen; render(); });
     $$('[data-sort]', root).forEach(b => b.addEventListener('click', () => { ui.tblSort = b.dataset.sort; render(); }));
     $$('[data-filter]', root).forEach(b => b.addEventListener('click', () => { ui.tblFilter = b.dataset.filter; render(); }));
@@ -378,22 +398,34 @@ const App = (() => {
     sheet(`#${p.entryNo} ${p.name} · ${tableName(s, p.tableId)} S${p.seat}`, [
       { label: '이동 — 테이블 선택', fn: () => moveSheet(pid) },
       { label: '이동 — 화면에서 좌석 탭 (자리 교환 가능)', fn: () => { ui.moveMode = { playerId: pid }; render(); } },
-      { label: '버스트아웃 (탈락 처리)', cls: 'danger', fn: () => doBust(pid) },
+      { label: '버스트아웃 (탈락 처리)', cls: 'danger', fn: () => { setTimeout(() => bustSheet(pid), 0); } },
     ], p.memo ? `<div class="muted small" style="margin-bottom:10px">${h(p.memo)}</div>` : '');
   }
-  function doBust(pid) {
+  /** 아웃시킨 사람(KO)을 고르는 시트. 같은 테이블 플레이어를 먼저 보여준다 */
+  function bustSheet(pid) {
+    const s = S(); const p = L.playerOf(s, pid); if (!p) return;
+    const others = L.activePlayers(s, p.eventId).filter(x => x.id !== pid);
+    const same = others.filter(x => x.tableId === p.tableId).sort((a, b) => a.seat - b.seat), rest = others.filter(x => x.tableId !== p.tableId);
+    const rank = others.length + 1, prize = L.payoutFor(s, curEvent(), rank);
+    const body = `<p class="muted small" style="margin:0 0 10px">${rank}위로 기록됩니다${prize ? ' · 상금 ' + money(prize) + '원' : ''}</p>
+      ${s.settings.askKO === false ? '' : `<label class="field"><span>누가 아웃시켰나요? (선택)</span><select id="koBy"><option value="">기록하지 않음</option>
+      ${same.length ? `<optgroup label="같은 테이블">${same.map(x => `<option value="${x.id}">${h(x.name)} (S${x.seat})</option>`).join('')}</optgroup>` : ''}
+      ${rest.length ? `<optgroup label="다른 테이블">${rest.map(x => `<option value="${x.id}">${h(x.name)} (${tableName(s, x.tableId)} S${x.seat})</option>`).join('')}</optgroup>` : ''}</select></label>`}`;
+    sheet(`${p.name} 탈락 처리 · ${tableName(s, p.tableId)} S${p.seat}`, [{ label: '탈락 확정', cls: 'danger', fn: (el) => { const by = $('#koBy', el) ? $('#koBy', el).value : ''; setTimeout(() => doBust(pid, by), 0); } }], body);
+  }
+  function doBust(pid, byId) {
     const p = L.playerOf(S(), pid); let r;
-    Store.commit('탈락: ' + p.name, st => { r = L.bustOut(st, pid); if (r.error) return false; });
+    Store.commit('탈락: ' + p.name, st => { r = L.bustOut(st, pid, byId); if (r.error) return false; });
     if (r.error) { toast(r.error); return; }
     const ev = curEvent(); const prize = L.payoutFor(S(), ev, r.rank);
     toast(`${p.name} 탈락 · 최종 ${r.rank}위${prize ? ' · 상금 ' + money(prize) + '원' : ''} (되돌리기 가능)`, 3500);
-    if (prize) setTimeout(() => sheet(`${r.rank}위 ${p.name} — 상금 ${money(prize)}원`, [
+    if (prize && S().settings.prizeSheet !== false) setTimeout(() => sheet(`${r.rank}위 ${p.name} — 상금 ${money(prize)}원`, [
       { label: '바우처 발행 + 인쇄', cls: 'primary', fn: () => issueAndPrint(pid, prize) },
-    ], '<div class="muted small" style="margin-bottom:10px">입상자입니다. 지금 바우처를 발행하거나, 이벤트 탭 순위표에서 나중에 발행할 수 있습니다.</div>'), 100);
+    ], '<div class="muted small" style="margin-bottom:10px">입상자입니다. 지금 바우처를 발행하거나, 현황 탭 순위표에서 나중에 발행할 수 있습니다.</div>'), 100);
   }
-  function doCloseTable(tid) {
+  async function doCloseTable(tid) {
     const s = S(); const t = L.tableOf(s, tid); const n = L.tablePlayers(s, tid).length;
-    if (!confirm(`T${t.number} 브레이크: ${n}명을 다른 테이블 빈 좌석에 무작위 배치하고 테이블을 닫습니다. 진행할까요?\n(상단 되돌리기로 취소할 수 있습니다)`)) return;
+    if (!await confirmBox(`T${t.number} 브레이크: ${n}명을 다른 테이블 빈 좌석에 무작위 배치하고 테이블을 닫습니다. 진행할까요?\n(상단 되돌리기로 취소할 수 있습니다)`, '브레이크')) return;
     let r; Store.commit(`T${t.number} 브레이크`, st => { r = L.closeTable(st, tid); if (r.error) return false; });
     if (r.error) { toast(r.error); return; }
     showMoves(`T${t.number} 브레이크 완료`, r.moves);
@@ -407,7 +439,60 @@ const App = (() => {
   function showMoves(title, moves) {
     const s = S();
     const body = `<div class="list" style="margin-bottom:12px">${moves.map(m => `<div class="list-item"><div class="grow"><div class="t">${h(m.player.name)} <span class="muted small">#${m.player.entryNo}</span></div><div class="s">${tableName(s, m.from.tableId)} S${m.from.seat} → <b>${tableName(s, m.to.tableId)} S${m.to.seat}</b></div></div></div>`).join('')}</div>`;
-    sheet(title + ` (${moves.length}명 이동)`, [{ label: '되돌리기', cls: 'ghost', fn: () => { Store.undo(); toast('되돌렸습니다'); } }], body);
+    sheet(title + ` (${moves.length}명 이동)`, [
+      { label: '이동 안내 인쇄 (1인 1장)', cls: 'primary', fn: () => printMoves(moves) },
+      { label: '되돌리기', cls: 'ghost', fn: () => { Store.undo(); toast('되돌렸습니다'); } }], body);
+  }
+  function printMoves(moves) {
+    const s = S(); const tpl = s.templates.confirm; const num = (id) => { const t = L.tableOf(s, id); return t ? t.number : '-'; };
+    Print.print(Print.moveHtml(tpl, { event: curEvent(), moves: moves.map(m => Object.assign({}, m, { fromNumber: num(m.from.tableId), toNumber: num(m.to.tableId) })) }), tpl.paper);
+  }
+  /** 오픈 밸런싱: 새 테이블을 열고 자동 밸런싱으로 전체 편차를 1 이하로 */
+  async function doOpenBalance(eventId) {
+    const s = S(); const ev = L.eventOf(s, eventId); const next = L.nextTableNumber(s, ev);
+    const ans = await promptBox(`새로 열 테이블 번호 (비우면 자동 ${next ? 'T' + next : '없음'})`, '', '열고 밸런싱'); if (ans == null) return;
+    let r, moves = [];
+    Store.commit('새 테이블 + 밸런싱', st => {
+      r = L.openTable(st, eventId, { number: +ans || 0 }); if (r.error) return false;
+      moves = L.autoBalance(st, eventId);
+    });
+    if (r.error) { toast(r.error); return; }
+    if (moves.length) showMoves(`T${r.number} 오픈 밸런싱`, moves); else toast(`T${r.number} 오픈 · 이동할 필요가 없습니다`);
+  }
+  /** 컨바인: 닫을 테이블을 여러 개 고르면 이동 계획을 미리 보여주고 실행 */
+  function combineSheet(eventId) {
+    const s = S(); const ts = L.openTables(s, eventId); let sel = [], plan = null;
+    const body = `<p class="muted small" style="margin:0 0 8px">닫을 테이블을 고르세요. 앉아 있던 플레이어는 남는 테이블에 인원이 적은 순으로 무작위 배정됩니다.</p>
+      <div class="tbl-toggle-grid" style="margin-bottom:10px">${ts.map(t => `<label class="tbl-toggle"><input type="checkbox" data-cmb="${t.id}"><b>T${t.number}</b><span class="muted small">${L.tablePlayers(s, t.id).length}명</span></label>`).join('')}</div>
+      <div id="cmbPlan" class="muted small" style="margin-bottom:12px">선택한 테이블이 없습니다.</div>`;
+    sheet('컨바인 (테이블 합치기)', [{ label: '컨바인 실행', cls: 'primary', fn: () => {
+      if (!plan || plan.error || !sel.length) { toast(plan && plan.error ? plan.error : '닫을 테이블을 고르세요'); return 'keep'; }
+      let done; const nums = sel.map(id => 'T' + L.tableOf(S(), id).number).join(', ');
+      Store.commit('컨바인: ' + nums, st => { done = L.applyCombine(st, sel, plan.moves); });
+      setTimeout(() => done.length ? showMoves(`${nums} 컨바인`, done) : toast(nums + ' 닫음'), 0);
+    } }], body, (el) => {
+      $$('[data-cmb]', el).forEach(cb => cb.addEventListener('change', () => {
+        sel = $$('[data-cmb]', el).filter(x => x.checked).map(x => x.dataset.cmb);
+        plan = L.planCombine(S(), eventId, sel);
+        const box = $('#cmbPlan', el);
+        if (!sel.length) box.innerHTML = '선택한 테이블이 없습니다.';
+        else if (plan.error) box.innerHTML = `<span class="warn-text">${h(plan.error)}</span>`;
+        else box.innerHTML = `<div class="list">${plan.moves.map(m => `<div class="list-item"><div class="grow"><div class="t">${h(m.player.name)}</div><div class="s">${tableName(S(), m.from.tableId)} S${m.from.seat} → <b>${tableName(S(), m.to.tableId)} S${m.to.seat}</b></div></div></div>`).join('') || '이동할 플레이어가 없습니다.'}</div>`;
+      }));
+    });
+  }
+  /** 빠른 탈락: 테이블·좌석 번호로 찾아서 탈락 처리 */
+  function quickBustSheet(eventId) {
+    const s = S(); const ts = L.openTables(s, eventId).slice().sort((a, b) => (L.tablePlayers(s, b.id).length ? 1 : 0) - (L.tablePlayers(s, a.id).length ? 1 : 0) || a.number - b.number);
+    const body = `<div class="row"><label class="field"><span>테이블</span><select id="qbT">${ts.map(t => `<option value="${t.id}">T${t.number} (${L.tablePlayers(s, t.id).length}명)</option>`).join('')}</select></label>
+      <label class="field"><span>좌석</span><select id="qbS"></select></label></div><div id="qbWho" class="assign-box"></div>`;
+    let pid = null;
+    sheet('빠른 탈락', [{ label: '이 플레이어 탈락 처리', cls: 'danger', fn: () => { if (!pid) { toast('그 좌석에 플레이어가 없습니다'); return 'keep'; } const id = pid; setTimeout(() => bustSheet(id), 0); } }], body, (el) => {
+      const tSel = $('#qbT', el), sSel = $('#qbS', el), who = $('#qbWho', el);
+      const show = () => { const p = L.seatPlayer(S(), tSel.value, +sSel.value); pid = p ? p.id : null; who.innerHTML = p ? `<span class="big">${h(p.name)}</span><span class="muted small">#${p.entryNo}</span>` : '<span class="muted">이 테이블에 플레이어가 없습니다</span>'; };
+      const fill = () => { const t = L.tableOf(S(), tSel.value); sSel.innerHTML = L.tablePlayers(S(), t.id).sort((a, b) => a.seat - b.seat).map(p => `<option value="${p.seat}">S${p.seat} ${h(p.name)}</option>`).join(''); show(); };
+      tSel.addEventListener('change', fill); sSel.addEventListener('change', show); fill();
+    });
   }
 
   /* ---------- 이벤트 탭 ---------- */
@@ -424,28 +509,20 @@ const App = (() => {
   function readPayoutRows(form) {
     return $$('.payout-row', form).map(r => ({ from: r.querySelector('[name=pfrom]').value, to: r.querySelector('[name=pto]').value, amount: r.querySelector('[name=pamount]').value, label: r.querySelector('[name=plabel]').value }));
   }
-  function viewEvents() {
-    const s = S(); const ev = curEvent();
-    const list = s.events.map(e => {
-      const all = L.eventPlayers(s, e.id), act = all.filter(p => p.status === 'active');
-      return `<div class="list-item ${e.id === s.selectedEventId ? 'current' : ''}">
-        <div class="grow" data-selevent="${e.id}" style="cursor:pointer"><div class="t">${h(e.name)} ${e.status === 'closed' ? '<span class="chip">종료</span>' : ''}</div>
-        <div class="s">바이인 ${money(e.buyIn)}원 · ${e.seats}인 · 테이블 T${e.tableStart || 1}~${e.tableEnd || '∞'} · 참가 ${all.length} / 남은 ${act.length} / 오픈 ${L.openTables(s, e.id).length}</div></div>
-        <button class="sm ghost" data-editevent="${e.id}">수정</button></div>`;
-    }).join('');
-    const ed = ui.eventEdit ? (ui.eventEdit === 'new' ? { name: '', buyIn: '', seats: s.settings.defaultSeats, startChips: '', memo: '', status: 'open', rakePct: 0, prizePool: '', payouts: [], tableStart: 1, tableEnd: '' } : L.eventOf(s, ui.eventEdit)) : null;
-    const editForm = ed ? `<div class="card"><h3>${ui.eventEdit === 'new' ? '새 이벤트' : '이벤트 수정'}</h3>
+  /** 이벤트 폼: 홈의 새 이벤트(isNew) / 설정 > 현황의 이벤트 정보·상금 구조 */
+  function eventFormHtml(ed, isNew) {
+    return `<div class="card"><h3>${isNew ? '새 이벤트' : '이벤트 정보 · 상금 구조'}</h3>
       <form id="eventForm">
         <label class="field"><span>이벤트 이름 *</span><input name="name" value="${h(ed.name)}" required placeholder="예: Main Event Day 1A"></label>
         <div class="row">
           <label class="field"><span>바이인 (원)</span><input name="buyIn" type="number" value="${h(ed.buyIn)}"></label>
-          <label class="field"><span>테이블당 좌석</span><input name="seats" type="number" min="2" max="12" value="${h(ed.seats)}"></label>
+          ${isNew ? `<label class="field"><span>테이블당 좌석</span><input name="seats" type="number" min="2" max="12" value="${h(ed.seats)}"></label>` : ''}
           <label class="field"><span>스타팅 칩</span><input name="startChips" type="number" value="${h(ed.startChips || '')}"></label>
         </div>
-        <div class="row">
+        ${isNew ? `<div class="row">
           <label class="field"><span>테이블 시작 번호</span><input name="tableStart" type="number" min="1" value="${h(ed.tableStart || 1)}"></label>
           <label class="field"><span>테이블 끝 번호 (비우면 제한 없음)</span><input name="tableEnd" type="number" min="1" value="${h(ed.tableEnd || '')}"></label>
-        </div>
+        </div>` : ''}
         <div class="row">
           <label class="field"><span>수수료 (%)</span><input name="rakePct" type="number" min="0" max="100" step="0.5" value="${h(ed.rakePct || 0)}"></label>
           <label class="field"><span>상금 풀 고정 (원, 비우면 바이인 합계−수수료)</span><input name="prizePool" type="number" value="${h(ed.prizePool || '')}"></label>
@@ -455,9 +532,22 @@ const App = (() => {
           <button type="button" class="sm ghost" id="btnAddPayout" style="margin-top:6px">구간 추가</button>
         </div>
         <label class="field"><span>메모</span><input name="memo" value="${h(ed.memo || '')}"></label>
-        ${ui.eventEdit !== 'new' ? `<label class="field"><span>상태</span><select name="status"><option value="open" ${ed.status === 'open' ? 'selected' : ''}>진행 중</option><option value="closed" ${ed.status === 'closed' ? 'selected' : ''}>종료</option></select></label>` : ''}
-        <div class="row"><button type="submit" class="primary">저장</button><button type="button" class="ghost" id="btnCancelEvent">취소</button>${ui.eventEdit !== 'new' ? `<button type="button" class="danger" id="btnDeleteEvent">삭제</button>` : ''}</div>
-      </form></div>` : '';
+        ${!isNew ? `<label class="field"><span>상태</span><select name="status"><option value="open" ${ed.status === 'open' ? 'selected' : ''}>진행 중</option><option value="closed" ${ed.status === 'closed' ? 'selected' : ''}>종료</option></select></label>` : ''}
+        <div class="row"><button type="submit" class="primary">저장</button>${isNew ? '<button type="button" class="ghost" id="btnCancelEvent">취소</button>' : ''}${!isNew ? `<button type="button" class="danger" id="btnDeleteEvent">삭제</button>` : ''}</div>
+      </form></div>`;
+  }
+  function viewEvents() {
+    const s = S(); const ev = curEvent();
+    const list = s.events.map(e => {
+      const all = L.eventPlayers(s, e.id), act = all.filter(p => p.status === 'active');
+      return `<div class="list-item ${e.id === s.selectedEventId ? 'current' : ''}">
+        <div class="grow" data-enter="${e.id}" style="cursor:pointer"><div class="t">${h(e.name)} ${e.status === 'closed' ? '<span class="chip">종료</span>' : ''}</div>
+        <div class="s">바이인 ${money(e.buyIn)}원 · ${e.seats}인 · 테이블 T${e.tableStart || 1}~${e.tableEnd || '∞'} · 참가 ${all.length} / 남은 ${act.length} / 오픈 ${L.openTables(s, e.id).length}</div></div>
+        <button class="sm ghost" data-editevent="${e.id}">설정</button><button class="sm primary" data-enter="${e.id}">들어가기</button></div>`;
+    }).join('');
+    if (ui.tab === 'home' && !s.events.length && !ui.eventEdit) ui.eventEdit = 'new';
+    const ed = ui.eventEdit === 'new' ? { name: '', buyIn: '', seats: s.settings.defaultSeats, startChips: '', memo: '', status: 'open', rakePct: 0, prizePool: '', payouts: [], tableStart: 1, tableEnd: '' } : null;
+    const editForm = ed ? eventFormHtml(ed, true) : '';
 
     let dash = '';
     if (ev && !ed) {
@@ -481,61 +571,65 @@ const App = (() => {
       } else if (ui.eventSection === 'payouts') {
         const total = L.payoutTotal(s, ev);
         const nameAt = (rank) => { const p = busted.find(b => b.finishRank === rank) || (rank === 1 && active.length === 1 ? active[0] : null); return p ? h(p.name) : ''; };
-        body = `<p class="muted small">상금 풀 ${money(pool)}원 (${ev.prizePool ? '고정' : `바이인 합계 ${money(gross)}원 − 수수료 ${ev.rakePct || 0}%`}) · 상금표 총액 ${money(total)}원 ${total > pool && pool ? '<span class="warn-text">(풀 초과)</span>' : ''} · 구간은 이벤트 수정에서 변경</p>
+        body = `<p class="muted small">상금 풀 ${money(pool)}원 (${ev.prizePool ? '고정' : `바이인 합계 ${money(gross)}원 − 수수료 ${ev.rakePct || 0}%`}) · 상금표 총액 ${money(total)}원 ${total > pool && pool ? '<span class="warn-text">(풀 초과)</span>' : ''} · 구간은 설정 &gt; 현황에서 변경</p>
         ${pay.length ? `<table class="tbl"><tr><th>순위</th><th>금액</th><th>인원</th><th>확정 선수</th></tr>
         ${pay.map(r => { const n = r.to - r.from + 1; const names = []; for (let k = r.from; k <= r.to && names.length < 6; k++) { const nm = nameAt(k); if (nm) names.push(k + '위 ' + nm); } return `<tr><td>${r.from === r.to ? r.from + '위' : r.from + '~' + r.to + '위'}</td><td>${r.amount ? money(r.amount) + '원' : ''}${r.label ? ` <span class="muted small">${h(r.label)}</span>` : ''}</td><td class="muted">${n}명 · ${money(r.amount * n)}원</td><td class="small">${names.join(', ') || '<span class="muted">-</span>'}</td></tr>`; }).join('')}
-        <tr><td><b>합계</b></td><td><b>${money(total)}원</b></td><td class="muted">${pay.reduce((n, r) => n + r.to - r.from + 1, 0)}명</td><td></td></tr></table>` : '<div class="muted">상금표가 없습니다. 이벤트 수정에서 구간을 추가하세요.</div>'}`;
+        <tr><td><b>합계</b></td><td><b>${money(total)}원</b></td><td class="muted">${pay.reduce((n, r) => n + r.to - r.from + 1, 0)}명</td><td></td></tr></table>` : '<div class="muted">상금표가 없습니다. 설정 &gt; 현황에서 구간을 추가하세요.</div>'}`;
       } else {
         const rows = [];
         if (active.length === 1) rows.push({ rank: 1, p: active[0], live: true });
         busted.forEach(b => rows.push({ rank: b.finishRank, p: b }));
         body = `<div class="list">${rows.map(({ rank, p, live }) => {
           const row = L.payoutRow(s, ev, rank); const prize = row ? row.amount : 0; const v = (s.vouchers || []).find(x => x.playerId === p.id);
-          return `<div class="list-item"><span class="rank">${rank}위</span><div class="grow"><div class="t">${h(p.name)} <span class="muted small">#${p.entryNo}${live ? ' · 진행 중' : ''}</span></div><div class="s">${prize ? money(prize) + '원' : (row && row.label ? '' : '입상 없음')}${row && row.label ? ' ' + h(row.label) : ''}${v ? ` · 바우처 ${v.serial} 발행됨` : ''}${p.bustedAt ? ' · ' + Print.fmtTime(p.bustedAt) : ''}</div></div>
+          return `<div class="list-item"><span class="rank">${rank}위</span><div class="grow"><div class="t">${h(p.name)} <span class="muted small">#${p.entryNo}${live ? ' · 진행 중' : ''}</span></div><div class="s">${prize ? money(prize) + '원' : (row && row.label ? '' : '입상 없음')}${row && row.label ? ' ' + h(row.label) : ''}${v ? ` · 바우처 ${v.serial} 발행됨` : ''}${p.knockouts ? ' · KO ' + p.knockouts : ''}${p.knockedBy && L.playerOf(s, p.knockedBy) ? ' · by ' + h(L.playerOf(s, p.knockedBy).name) : ''}${p.bustedAt ? ' · ' + Print.fmtTime(p.bustedAt) : ''}</div></div>
             ${prize && !v ? `<button class="sm primary" data-issue="${p.id}" data-amt="${prize}">바우처</button>` : ''}${v ? `<button class="sm ghost" data-revoucher="${v.id}">재인쇄</button>` : ''}${!live ? `<button class="sm ghost" data-unbust="${p.id}">복구</button>` : ''}</div>`;
         }).join('') || '<div class="muted small">아직 탈락자가 없습니다.</div>'}</div>
         ${active.length > 1 ? `<p class="muted small" style="margin-top:8px">남은 ${active.length}명은 테이블 탭에서 탈락 처리하면 여기에 순위가 쌓입니다.</p>` : ''}`;
       }
-      dash = `<div class="card"><div class="row tight" style="margin-bottom:10px"><h2 style="margin:0">${h(ev.name)}</h2><span style="flex:1"></span>${secs.map(([k, lb]) => `<button class="sm ${ui.eventSection === k ? 'primary' : 'ghost'}" data-esec="${k}">${lb}</button>`).join('')}</div>${body}</div>`;
+      dash = `<div class="card"><div class="row tight" style="margin-bottom:10px"><h2 style="margin:0">${h(ev.name)}</h2><span style="flex:1"></span>${secs.map(([k, lb]) => `<button class="sm ${ui.eventSection === k ? 'primary' : 'ghost'}" data-esec="${k}">${lb}</button>`).join('')}<button class="sm ghost" data-editevent="${ev.id}">이벤트 설정</button></div>${body}</div>`;
     }
-    return `${dash}${editForm}
-    <div class="card"><div class="row tight"><h3 style="margin:0">이벤트 목록</h3><span style="flex:1"></span><button class="primary sm" id="btnNewEvent">새 이벤트</button></div>
-      <div class="list" style="margin-top:10px">${list || '<div class="muted">이벤트가 없습니다. 새 이벤트를 만들어 시작하세요.</div>'}</div></div>`;
+    if (ui.tab !== 'home') return editForm || dash;
+    return `${editForm}
+    <div class="card"><div class="row tight"><h2 style="margin:0">이벤트</h2><span class="muted small">들어가면 그 이벤트의 등록·테이블·클락·딜러를 관리합니다</span><span style="flex:1"></span><button class="primary" id="btnNewEvent">새 이벤트 만들기</button></div>
+      <div class="list" style="margin-top:12px">${list || '<div class="muted">이벤트가 없습니다. 새 이벤트를 만들어 시작하세요.</div>'}</div></div>`;
   }
   function bindEvents(root) {
-    $('#btnNewEvent', root).addEventListener('click', () => { ui.eventEdit = 'new'; render(); setTimeout(() => { const i = $('#eventForm input[name=name]'); if (i) i.focus(); }, 0); });
-    $$('[data-selevent]', root).forEach(el => el.addEventListener('click', () => { Store.patch(st => st.selectedEventId = el.dataset.selevent); ui.regSeat = null; ui.moveMode = null; }));
-    $$('[data-editevent]', root).forEach(b => b.addEventListener('click', () => { ui.eventEdit = b.dataset.editevent; render(); }));
+    const nb = $('#btnNewEvent', root); if (nb) nb.addEventListener('click', () => { ui.eventEdit = 'new'; render(); setTimeout(() => { const i = $('#eventForm input[name=name]'); if (i) i.focus(); }, 0); });
+    $$('[data-enter]', root).forEach(el => el.addEventListener('click', (e) => { e.stopPropagation(); enterEvent(el.dataset.enter); }));
+    $$('[data-editevent]', root).forEach(b => b.addEventListener('click', () => openSettings(b.dataset.editevent, 'event')));
     $$('[data-esec]', root).forEach(b => b.addEventListener('click', () => { ui.eventSection = b.dataset.esec; render(); }));
     $$('[data-issue]', root).forEach(b => b.addEventListener('click', () => issueAndPrint(b.dataset.issue, +b.dataset.amt)));
     $$('[data-revoucher]', root).forEach(b => b.addEventListener('click', () => printVoucher(b.dataset.revoucher)));
     $$('[data-unbust]', root).forEach(b => b.addEventListener('click', () => doUnbust(b.dataset.unbust)));
-    const fin = $('#btnFinish', root); if (fin) fin.addEventListener('click', () => {
+    const fin = $('#btnFinish', root); if (fin) fin.addEventListener('click', async () => {
       const ev = curEvent(); const w = L.activePlayers(S(), ev.id)[0];
-      if (!confirm(`${w.name}을(를) 1위로 확정하고 "${ev.name}"을(를) 종료할까요?`)) return;
+      if (!await confirmBox(`${w.name}을(를) 1위로 확정하고 "${ev.name}"을(를) 종료할까요?`, '우승 확정')) return;
       Store.commit('이벤트 종료: ' + ev.name, st => { const x = L.playerOf(st, w.id); x.status = 'busted'; x.finishRank = 1; x.bustedAt = Date.now(); x.lastSeat = { tableId: x.tableId, seat: x.seat }; x.tableId = null; x.seat = null; L.eventOf(st, ev.id).status = 'closed'; });
       ui.eventSection = 'ranks'; render(); toast('이벤트 종료 · 순위표를 확인하세요');
     });
+    bindEventForm(root, ui.eventEdit === 'new');
+  }
+  function bindEventForm(root, isNew) {
     const form = $('#eventForm', root); if (!form) return;
+    const editId = isNew ? null : curEvent().id;
     form.addEventListener('submit', (e) => {
       e.preventDefault(); const fd = new FormData(form); const data = Object.fromEntries(fd.entries());
       ['pfrom', 'pto', 'pamount', 'plabel'].forEach(k => delete data[k]);
       data.payouts = L.normalizePayouts(readPayoutRows(form));
       data.rakePct = +data.rakePct || 0; data.prizePool = +data.prizePool || 0;
       if (data.tableEnd && +data.tableEnd < +data.tableStart) { toast('테이블 끝 번호가 시작 번호보다 작습니다'); return; }
-      if (ui.eventEdit === 'new') { let ev; Store.commit('이벤트 생성: ' + data.name, st => { ev = L.createEvent(st, data); st.selectedEventId = ev.id; }); toast('이벤트 생성됨'); }
-      else { Store.commit('이벤트 수정', st => L.updateEvent(st, ui.eventEdit, data)); toast('저장됨'); }
-      ui.eventEdit = null; render();
+      if (isNew) { let ev; Store.commit('이벤트 생성: ' + data.name, st => { ev = L.createEvent(st, data); st.selectedEventId = ev.id; }); ui.eventEdit = null; toast('이벤트를 만들었습니다. 등록을 시작하세요'); enterEvent(ev.id); return; }
+      Store.commit('이벤트 수정', st => L.updateEvent(st, editId, data)); toast('저장됨');
     });
     const rerows = (rows) => { $('#payoutRows', form).innerHTML = payoutRowsHtml(rows); bindRows(); };
     const bindRows = () => $$('[data-delrow]', form).forEach(b => b.addEventListener('click', () => { const rows = readPayoutRows(form); rows.splice(+b.dataset.delrow, 1); rerows(rows); }));
     bindRows();
     $('#btnAddPayout', form).addEventListener('click', () => { const rows = readPayoutRows(form); const last = rows[rows.length - 1]; const next = last ? (+last.to || +last.from || 0) + 1 : 1; rows.push({ from: next, to: next, amount: '', label: '' }); rerows(rows); });
-    $('#btnCancelEvent', root).addEventListener('click', () => { ui.eventEdit = null; render(); });
-    const del = $('#btnDeleteEvent', root); if (del) del.addEventListener('click', () => {
-      const ev = L.eventOf(S(), ui.eventEdit); const n = L.eventPlayers(S(), ev.id).length;
-      if (!confirm(`"${ev.name}" 이벤트와 참가자 ${n}명, 테이블 정보를 모두 삭제할까요?\n(되돌리기 가능)`)) return;
-      Store.commit('이벤트 삭제: ' + ev.name, st => L.deleteEvent(st, ev.id)); ui.eventEdit = null; render(); toast('이벤트 삭제됨');
+    const cancel = $('#btnCancelEvent', root); if (cancel) cancel.addEventListener('click', () => { ui.eventEdit = null; render(); });
+    const del = $('#btnDeleteEvent', root); if (del) del.addEventListener('click', async () => {
+      const ev = L.eventOf(S(), editId); const n = L.eventPlayers(S(), ev.id).length;
+      if (!await confirmBox(`"${ev.name}" 이벤트와 참가자 ${n}명, 테이블 정보를 모두 삭제할까요?\n(되돌리기 가능)`, '삭제', true)) return;
+      Store.commit('이벤트 삭제: ' + ev.name, st => L.deleteEvent(st, ev.id)); ui.eventEdit = null; toast('이벤트 삭제됨'); location.hash = '#home';
     });
   }
   function doUnbust(pid) {
@@ -572,20 +666,16 @@ const App = (() => {
     const s = S(); const tpl = s.templates[kind]; const sm = Print.sample();
     return kind === 'confirm' ? Print.confirmHtml(tpl, sm) : Print.voucherHtml(tpl, sm);
   }
+  /* 용지 탭 = 바우처 발행·발행 내역. 용지 모양(템플릿)과 데이터는 설정 > 용지 / 현황 */
   function viewPrint() {
     const s = S(); const ev = curEvent();
-    const tabs = [['confirm', '참가확인증'], ['voucher', '상금바우처'], ['voucher-issue', '바우처 발행'], ['data', '데이터/설정']];
+    if (!ev) return noEventHtml();
     let body = '';
-    if (ui.printTab === 'confirm' || ui.printTab === 'voucher') {
-      body = `<div class="card">${tplEditorHtml(ui.printTab, s.templates[ui.printTab])}</div><div class="preview-wrap" id="preview">${previewHtml(ui.printTab)}</div>`;
-    } else if (ui.printTab === 'voucher-issue') {
-      if (!ev) body = noEventHtml();
-      else {
         const busted = L.bustedPlayers(s, ev.id), active = L.activePlayers(s, ev.id);
         const opt = (p, pre) => `<option value="${p.id}" data-amt="${p.finishRank ? L.payoutFor(s, ev, p.finishRank) : ''}" ${ui.voucherForm.playerId === p.id ? 'selected' : ''}>${pre} · ${h(p.name)} (#${p.entryNo})</option>`;
         const opts = busted.map(p => opt(p, p.finishRank + '위')).join('') + active.map(p => opt(p, '진행중')).join('');
         const vs = (s.vouchers || []).filter(v => v.eventId === ev.id).sort((a, b) => b.issuedAt - a.issuedAt);
-        body = `<div class="card"><h3>바우처 수동 발행 <span class="muted small">${h(ev.name)}</span></h3><p class="muted small">입상자 바우처는 이벤트 탭 &gt; 순위표에서 금액이 자동 계산됩니다. 여기서는 딜·특별상 등 임의 금액을 발행합니다.</p>
+        body = `<div class="card"><div class="row tight" style="margin-bottom:6px"><h3 style="margin:0">바우처 수동 발행 <span class="muted small">${h(ev.name)}</span></h3><span style="flex:1"></span><a class="btn-link sm" href="#settings" data-gosec="paper">용지 설정</a></div><p class="muted small">입상자 바우처는 현황 탭 &gt; 순위표에서 금액이 자동 계산됩니다. 여기서는 딜·특별상 등 임의 금액을 발행합니다.</p>
           <form id="voucherForm">
             <label class="field"><span>수령인</span><select name="playerId"><option value="">직접 입력</option>${opts}</select></label>
             <label class="field" id="manualNameWrap" style="${ui.voucherForm.playerId ? 'display:none' : ''}"><span>이름 (직접 입력)</span><input name="manualName" placeholder="수령인 이름"></label>
@@ -593,29 +683,10 @@ const App = (() => {
             <button type="submit" class="primary">발행 + 인쇄</button>
           </form></div>
           <div class="card"><h3>발행 내역 (${vs.length}) <span class="muted small">합계 ${money(vs.reduce((n, v) => n + v.amount, 0))}원</span></h3><div class="list">${vs.map(v => `<div class="list-item"><span class="rank">${v.serial}</span><div class="grow"><div class="t">${h(v.playerName)} ${v.rank ? `<span class="muted small">${v.rank}위</span>` : ''}</div><div class="s">${money(v.amount)}원 · ${Print.fmtTime(v.issuedAt)}${v.note ? ' · ' + h(v.note) : ''}</div></div><button class="sm ghost" data-revoucher="${v.id}">재인쇄</button><button class="sm ghost" data-delvoucher="${v.id}">취소</button></div>`).join('') || '<div class="muted small">발행된 바우처가 없습니다.</div>'}</div></div>`;
-      }
-    } else {
-      body = `<div class="card"><h3>설정</h3>
-        <label class="chk" style="margin-bottom:8px"><input type="checkbox" id="setAutoPrint" ${s.settings.autoPrintOnRegister !== false ? 'checked' : ''}>등록 시 참가확인증 자동 인쇄</label>
-        <label class="chk" style="margin-bottom:8px"><input type="checkbox" id="setAutoOpen" ${s.settings.autoOpenTable !== false ? 'checked' : ''}>빈 좌석이 없으면 새 테이블 자동 오픈</label>
-        <label class="field"><span>새 이벤트 기본 좌석 수</span><input type="number" id="setSeats" value="${s.settings.defaultSeats}" min="2" max="12"></label></div>
-        <div class="card"><h3>데이터</h3><p class="muted small">데이터는 이 브라우저(localStorage)에만 저장됩니다. 다른 기기로 옮기려면 내보내기/가져오기를 사용하세요.</p>
-        <div class="row"><button id="btnExport">내보내기 (JSON)</button><button id="btnImport">가져오기</button><button id="btnCsv">참가자 CSV</button><input type="file" id="importFile" accept="application/json" class="hidden"></div>
-        <div style="margin-top:10px"><button class="danger sm" id="btnReset">전체 초기화</button></div></div>`;
-    }
-    return `<div class="row tight" style="margin-bottom:12px">${tabs.map(([k, lb]) => `<button class="sm ${ui.printTab === k ? 'primary' : 'ghost'}" data-ptab="${k}">${lb}</button>`).join('')}</div>${body}`;
+    return body;
   }
   function bindPrint(root) {
-    $$('[data-ptab]', root).forEach(b => b.addEventListener('click', () => { ui.printTab = b.dataset.ptab; render(); }));
-    bindNoEvent(root);
-    const tf = $('.tpl-form', root);
-    if (tf) {
-      const kind = tf.dataset.kind;
-      const read = () => { const fd = new FormData(tf); const o = {}; ['title', 'subtitle', 'logoText', 'paper', 'footer'].forEach(k => o[k] = fd.get(k) || ''); $$('input[type=checkbox]', tf).forEach(c => o[c.name] = c.checked); return o; };
-      tf.addEventListener('input', () => { Object.assign(S().templates[kind], read()); $('#preview').innerHTML = previewHtml(kind); });
-      tf.addEventListener('change', () => { Store.patch(st => Object.assign(st.templates[kind], read())); });
-      $('[data-testprint]', tf).addEventListener('click', () => { const tpl = S().templates[kind]; Print.print(previewHtml(kind), tpl.paper); });
-    }
+    bindNoEvent(root); bindGoSec(root);
     const vf = $('#voucherForm', root);
     if (vf) {
       vf.playerId.addEventListener('change', () => {
@@ -632,13 +703,319 @@ const App = (() => {
         printVoucher(v.id);
       });
       $$('[data-revoucher]', root).forEach(b => b.addEventListener('click', () => printVoucher(b.dataset.revoucher)));
-      $$('[data-delvoucher]', root).forEach(b => b.addEventListener('click', () => { if (confirm('이 바우처 발행 기록을 취소할까요?')) Store.commit('바우처 취소', st => { st.vouchers = st.vouchers.filter(v => v.id !== b.dataset.delvoucher); }); }));
+      $$('[data-delvoucher]', root).forEach(b => b.addEventListener('click', async () => { if (await confirmBox('이 바우처 발행 기록을 취소할까요?', '발행 취소', true)) Store.commit('바우처 취소', st => { st.vouchers = st.vouchers.filter(v => v.id !== b.dataset.delvoucher); }); }));
     }
-    const ap = $('#setAutoPrint', root);
-    if (ap) {
-      ap.addEventListener('change', () => Store.patch(st => st.settings.autoPrintOnRegister = ap.checked));
-      $('#setAutoOpen', root).addEventListener('change', (e) => Store.patch(st => st.settings.autoOpenTable = e.target.checked));
-      $('#setSeats', root).addEventListener('change', (e) => Store.patch(st => st.settings.defaultSeats = +e.target.value || 9));
+  }
+  function printVoucher(id) {
+    const s = S(); const v = (s.vouchers || []).find(x => x.id === id); if (!v) return;
+    const tpl = s.templates.voucher; Print.print(Print.voucherHtml(tpl, { voucher: v, event: L.eventOf(s, v.eventId) }), tpl.paper);
+  }
+
+  /* ---------- 클락 탭 ---------- */
+  const F = Floor;
+  /** 클락 변경은 히스토리에 남기지 않는다(되돌리기로 시간이 되감기지 않도록) */
+  const clockPatch = (fn) => { const ev = curEvent(); if (!ev) return; Store.patch(st => { const e = L.eventOf(st, ev.id); F.ensure(e); fn(e); }); };
+  function avgStack(s, ev) { const act = L.activePlayers(s, ev.id).length; return act && ev.startChips ? ev.startChips * L.eventPlayers(s, ev.id).length / act : 0; }
+  function clockVals(s, ev) {
+    const lv = F.levels(ev), c = F.clockOf(ev), l = lv[c.idx], nx = lv[c.idx + 1], bi = F.breakIn(ev), pin = F.nextPushIn(), ddc = F.live.clock;
+    return {
+      level: F.levelLabel(ev, c.idx) + (c.running ? '' : ' · 정지'),
+      time: F.mmss(F.remain(c)),
+      blinds: F.blindText(l),
+      next: nx ? '다음 ' + (nx.brk ? '브레이크 ' + nx.min + '분' : F.blindText(nx)) : '마지막 레벨',
+      toggle: c.running ? '일시정지' : '시작',
+      break: l && l.brk ? '브레이크 중' : bi == null ? '-' : F.mmss(bi),
+      push: pin == null ? (F.ddReady() ? '로테이션 시작 전' : 'DD 연결 전') : ddc && ddc.paused ? '일시정지' : pin <= 0 ? '지금' : F.mmss(pin),
+      chip: `${F.levelLabel(ev, c.idx).replace('레벨 ', 'Lv')} ${F.mmss(F.remain(c))}${c.running ? '' : ' 정지'}`,
+    };
+  }
+  function paintClock() {
+    const s = S(), ev = curEvent(); if (!ev) return;
+    const v = clockVals(s, ev);
+    $$('[data-clk]').forEach(el => { const t = v[el.dataset.clk]; if (t != null && el.textContent !== t) el.textContent = t; });
+  }
+  function viewClock() {
+    const s = S(); const ev = curEvent();
+    if (!ev) return noEventHtml();
+    const lv = F.levels(ev), c = F.clockOf(ev);
+    const all = L.eventPlayers(s, ev.id), act = L.activePlayers(s, ev.id).length, avg = avgStack(s, ev);
+    const reg = F.lateRegOpen(ev);
+    let n = 0;
+    return `
+    <div class="card clock">
+      <div class="clk-level" data-clk="level"></div>
+      <div class="clk-time" data-clk="time"></div>
+      <div class="clk-blinds" data-clk="blinds"></div>
+      <div class="muted" data-clk="next"></div>
+      <div class="clk-ctrl">
+        <button id="clkPrev">이전 레벨</button>
+        <button class="primary clk-main" id="clkToggle" data-clk="toggle"></button>
+        <button id="clkNext">다음 레벨</button>
+      </div>
+      <div class="clk-ctrl">
+        <button class="sm ghost" data-clkadd="-60000">-1분</button>
+        <button class="sm ghost" data-clkadd="60000">+1분</button>
+        <button class="sm ghost" id="clkReset">레벨 처음부터</button>
+        <button class="sm" id="clkBoard">전광판 열기</button>
+      </div>
+    </div>
+    <div class="kpis">
+      ${kpi('남은 / 참가', act + ' / ' + all.length)}
+      ${kpi('평균 스택', avg ? money(Math.round(avg)) + ' <span class="muted small">' + (avg / F.currentBB(ev)).toFixed(1) + 'BB</span>' : '<span class="muted small">스타팅 칩 미입력</span>')}
+      ${kpi('다음 브레이크', '<span data-clk="break"></span>')}
+      ${kpi('딜러 교대', '<span data-clk="push"></span>')}
+      ${kpi('레이트 레지', reg == null ? '<span class="muted small">설정 안 함</span>' : reg ? '진행 중' : '<span class="warn-text">마감</span>')}
+      ${kpi('상금 풀', money(L.prizePool(s, ev)) + '원')}
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="row tight" style="margin-bottom:8px"><h3 style="margin:0">블라인드 구조</h3><span class="muted small">편집은 설정 &gt; 클락</span><span style="flex:1"></span><a class="btn-link sm" href="#settings" data-gosec="clock">구조 편집</a></div>
+      <div style="overflow-x:auto"><table class="tbl lv-tbl"><tr><th>레벨</th><th>블라인드 (앤티)</th><th>시간</th><th></th></tr>
+      ${lv.map((l, i) => { if (!l.brk) n++; const cur = i === c.idx; return `<tr class="${cur ? 'cur' : ''}"><td>${l.brk ? '<span class="chip warn">브레이크</span>' : 'Lv ' + n}${cur ? ' <span class="chip ok">진행</span>' : ''}</td><td>${F.blindText(l)}</td><td>${l.min}분</td><td class="nowrap">${cur ? '' : `<button class="sm ghost" data-goto="${i}">이 레벨로</button>`}</td></tr>`; }).join('')}
+      </table></div>
+    </div>`;
+  }
+  function bindClock(root) {
+    if (!curEvent()) { bindNoEvent(root); return; }
+    $('#clkToggle', root).addEventListener('click', () => clockPatch(e => F.clockOf(e).running ? F.pause(e) : F.start(e)));
+    $('#clkPrev', root).addEventListener('click', () => clockPatch(e => F.setLevel(e, e.clock.idx - 1)));
+    $('#clkNext', root).addEventListener('click', () => clockPatch(e => F.setLevel(e, e.clock.idx + 1)));
+    $('#clkReset', root).addEventListener('click', () => clockPatch(e => F.setLevel(e, e.clock.idx)));
+    $$('[data-clkadd]', root).forEach(b => b.addEventListener('click', () => clockPatch(e => F.addTime(e, +b.dataset.clkadd))));
+    $$('[data-goto]', root).forEach(b => b.addEventListener('click', () => clockPatch(e => F.setLevel(e, +b.dataset.goto))));
+    $('#clkBoard', root).addEventListener('click', openBoard);
+    bindGoSec(root);
+  }
+
+  /* ---------- 전광판 ---------- */
+  function boardHtml() {
+    const s = S(), ev = curEvent(); if (!ev) return '';
+    const act = L.activePlayers(s, ev.id).length, avg = avgStack(s, ev), pay = L.payoutTable(s, ev);
+    return `<div class="bd-top"><span>${h(ev.name)}</span><button id="bdClose">닫기 (Esc)</button></div>
+      <div class="bd-mid"><div class="bd-level" data-clk="level"></div><div class="bd-time" data-clk="time"></div><div class="bd-blinds" data-clk="blinds"></div><div class="bd-next" data-clk="next"></div></div>
+      <div class="bd-stats">
+        <div><span>남은 인원</span><b>${act} / ${L.eventPlayers(s, ev.id).length}</b></div>
+        ${s.settings.boardAvg !== false ? `<div><span>평균 스택</span><b>${avg ? money(Math.round(avg)) : '-'}</b></div>` : ''}
+        ${s.settings.boardPool !== false ? `<div><span>상금 풀</span><b>${money(L.prizePool(s, ev))}</b></div>` : ''}
+        ${s.settings.boardFirst !== false ? `<div><span>1위 상금</span><b>${pay.length && pay[0].from === 1 ? money(pay[0].amount) : '-'}</b></div>` : ''}
+        ${s.settings.boardBreak !== false ? `<div><span>다음 브레이크</span><b data-clk="break"></b></div>` : ''}
+      </div>`;
+  }
+  function openBoard() {
+    const b = $('#board'); b.innerHTML = boardHtml(); b.classList.remove('hidden');
+    $('#bdClose').addEventListener('click', closeBoard); paintClock();
+    try { document.documentElement.requestFullscreen && document.documentElement.requestFullscreen().catch(() => {}); } catch (e) { /* 전체화면은 선택 */ }
+  }
+  function closeBoard() {
+    $('#board').classList.add('hidden'); $('#board').innerHTML = '';
+    try { if (document.fullscreenElement) document.exitFullscreen(); } catch (e) { /* 무시 */ }
+  }
+
+  let audioCtx;
+  function beep() {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      for (let i = 0; i < 3; i++) {
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t0 = audioCtx.currentTime + i * 0.35;
+        o.frequency.value = 880; o.connect(g); g.connect(audioCtx.destination);
+        g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.25, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.28);
+        o.start(t0); o.stop(t0 + 0.3);
+      }
+    } catch (e) { /* 소리는 선택 */ }
+  }
+  /** 0.5초마다: 시간이 다 된 레벨 넘기기(모든 이벤트) + 화면의 시계 숫자 갱신 */
+  function tick() {
+    const s = S();
+    if (F.gate() === 'boot' && !ui.ddFail && Date.now() - ui.bootAt > 6000) { ui.ddFail = true; render(); }
+    const due = s.events.filter(e => e.clock && e.clock.running && F.remain(e.clock) <= 0);
+    if (due.length) {
+      let curChanged = false;
+      Store.patch(st => due.forEach(d => { const e = L.eventOf(st, d.id); if (F.advance(e) && e.id === st.selectedEventId) curChanged = true; }));
+      if (curChanged) { const ev = curEvent(); if (s.settings.levelBeep !== false) beep(); toast(ev.name + ' · ' + F.levelLabel(ev, ev.clock.idx) + ' ' + F.blindText(ev.levels[ev.clock.idx]), 4000); }
+    }
+    // 설정 > 클락 > 레벨 끝나기 전 미리 알림 (지금 이벤트만, 레벨마다 한 번)
+    const warn = +s.settings.warnBeforeMin || 0, cev = curEvent();
+    if (warn && cev && cev.clock && cev.clock.running) {
+      const r = F.remain(cev.clock), key = cev.id + ':' + cev.clock.idx;
+      if (r > 0 && r <= warn * 60000 && ui.warned !== key && cev.clock.idx < F.levels(cev).length - 1) {
+        ui.warned = key; if (s.settings.levelBeep !== false) beep();
+        toast(`${F.levelLabel(cev, cev.clock.idx)} 종료 ${warn}분 전 · 다음 ${F.blindText(F.levels(cev)[cev.clock.idx + 1])}`, 4000);
+      }
+    }
+    paintClock();
+  }
+
+  /* ---------- 딜러 탭: dealer-director 앱(iframe #ddFrame) ---------- */
+  function viewDealers() {
+    const l = F.live;
+    if (l.page === 'event') return '';
+    const msg = l.page === 'login' ? 'DD 계정으로 로그인하면 딜러 관리가 시작됩니다.'
+      : l.page === 'list' ? 'DD 에서 오늘 이벤트를 만들거나 고르세요. 그 이벤트에 레지·테이블 탭에서 여는 테이블이 자동으로 들어가 로테이션이 만들어집니다.'
+      : l.page ? 'DD 화면을 이벤트로 돌려 주세요.' : '딜러 디렉터를 불러오는 중입니다.';
+    return `<div class="banner warn dd-note"><span class="grow">${msg}</span></div>`;
+  }
+  function bindDealers() { /* 조작은 모두 iframe 안의 DD 가 맡는다 */ }
+  /** DD 가 보낸 상태가 바뀌었을 때: 주소 기억, 새 테이블에 앉은 딜러 안내, 딜러 칩이 보이는 탭이면 다시 그리기 */
+  let liveSig = '', livePrev = [];
+  function onDdLive(l) {
+    const s = S();
+    if (l.href !== (s.settings.ddHref || '')) Store.patch(st => { st.settings.ddHref = l.href; });
+    const prev = new Map(livePrev.map(t => [t.no, t.dealer]));
+    l.tables.forEach(t => { if (t.dealer && !prev.has(t.no) && s.tables.some(x => x.status === 'open' && x.number === t.no)) toast(`T${t.no} 딜러 ${t.dealer} 자동 배치`, 2500); });
+    livePrev = l.tables.slice();
+    const gate = F.gate();
+    if (gate !== ui.gate) { ui.gate = gate; render(); if (gate === 'ok' && ui.gateWas === 'login') toast('로그인됨 · ' + (l.href ? '이벤트를 이어서 엽니다' : 'DD 에서 오늘 이벤트를 고르세요'), 3000); ui.gateWas = gate; return; }
+    const sig = l.page + '|' + JSON.stringify(l.tables) + '|' + (l.event && l.event.name);
+    if (sig !== liveSig) { liveSig = sig; if (['tables', 'dealers', 'settings'].includes(ui.tab)) render(); }
+    paintClock();
+  }
+
+  /* ---------- 설정 탭: 레지 / 테이블 / 클락 / 딜러 / 현황 / 용지 ----------
+     data-set="키"  → s.settings[키] (현장 공통, patch)
+     data-ev="키"   → 지금 이벤트의 필드 (commit, 되돌리기 가능)
+     data-dd="키"   → 딜러 엔진(DD) 설정 (Floor.setDD) */
+  const SET_SECS = [['reg', '레지'], ['table', '테이블'], ['clock', '클락'], ['dealer', '딜러'], ['event', '현황'], ['paper', '용지']];
+  /** 이벤트 목록 등에서 특정 이벤트의 설정 칸으로 */
+  function openSettings(eventId, sec) {
+    Store.patch(st => st.selectedEventId = eventId); ui.setSec = sec || 'reg'; ui.eventEdit = null;
+    if (location.hash === '#settings') render(); else location.hash = '#settings';
+  }
+  const scope = (txt) => `<span class="scope">${txt}</span>`;
+  const setChk = (k, label, hint) => `<label class="set-row"><span class="set-l">${label}${hint ? `<small>${hint}</small>` : ''}</span><input type="checkbox" data-set="${k}" ${S().settings[k] !== false ? 'checked' : ''}></label>`;
+  const setSel = (k, label, opts, hint) => `<label class="set-row"><span class="set-l">${label}${hint ? `<small>${hint}</small>` : ''}</span><select class="sm-select" data-set="${k}">${opts.map(([v, t]) => `<option value="${v}" ${String(S().settings[k]) === String(v) ? 'selected' : ''}>${t}</option>`).join('')}</select></label>`;
+  const numRow = (attr, k, val, label, hint, unit, min) => `<label class="set-row"><span class="set-l">${label}${hint ? `<small>${hint}</small>` : ''}</span><span class="set-num"><input type="number" ${attr}="${k}" value="${val}" min="${min == null ? 0 : min}">${unit ? `<span class="muted small">${unit}</span>` : ''}</span></label>`;
+  const evChk = (ev, k, label, hint) => `<label class="set-row"><span class="set-l">${label}${hint ? `<small>${hint}</small>` : ''}</span><input type="checkbox" data-ev="${k}" ${ev[k] ? 'checked' : ''}></label>`;
+
+  /** 좌석 번호 사용 설정: 실제 테이블 모양(타원) 둘레에 좌석을 그린다. 맨 위 가운데가 딜러 자리 */
+  function seatTableHtml(s, ev) {
+    const off = new Set(ev.disabledSeats || []), n = ev.seats;
+    const seats = Array.from({ length: n }, (_, i) => {
+      const no = i + 1, a = (-90 + 360 * no / (n + 1)) * Math.PI / 180;
+      const x = 50 + 47 * Math.cos(a), y = 50 + 44 * Math.sin(a);
+      return `<button type="button" class="felt-seat ${off.has(no) ? 'off' : ''}" style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%" data-evseat="${no}" title="${no}번 좌석 ${off.has(no) ? '사용 안함' : '사용'}"><b>${no}</b><small>${off.has(no) ? '안씀' : '사용'}</small></button>`;
+    }).join('');
+    return `<div class="felt"><div class="felt-oval"><span>${n}인 테이블</span><small>사용 ${n - off.size}석</small></div><span class="felt-dealer">딜러</span>${seats}</div>`;
+  }
+
+  function viewSettings() {
+    const s = S(), ev = curEvent(), set = s.settings;
+    if (!ev) return noEventHtml();
+    const sec = ui.setSec;
+    const nav = `<div class="set-nav">${SET_SECS.map(([k, lb]) => `<button class="sm ${sec === k ? 'primary' : 'ghost'}" data-setsec="${k}">${lb}</button>`).join('')}</div>`;
+    let body = '';
+    if (sec === 'reg') {
+      const late = F.lateRegOpen(ev);
+      body = `
+      <div class="card"><h3>등록 화면 ${scope('모든 이벤트 공통')}</h3>
+        ${setChk('autoPrintOnRegister', '등록하면 참가확인증 인쇄', '끄면 기본 버튼이 \'등록\'이 되고, 인쇄는 옆 버튼으로')}
+        ${setSel('regPhone', '연락처 입력칸', [['show', '보이기 (선택 입력)'], ['required', '필수'], ['hide', '숨기기']])}
+        ${setChk('regMemo', '메모 입력칸', '리엔트리·애드온 표시용')}
+        ${setChk('dupWarn', '같은 이름 경고', '이미 등록된 이름이면 폼 아래에 알림')}
+        ${setChk('seatPickAllowed', '좌석 직접 지정 허용', '등록 폼에 \'좌석 지정\' 체크칸을 보입니다')}
+        ${setSel('seatMode', '자동 좌석 배정 방식', [['random', '무작위 (인원 적은 테이블 중)'], ['order', '번호 순서대로 (인원 적은 테이블 중)']], '어느 쪽이든 인원이 가장 적은 테이블부터 채웁니다')}
+      </div>
+      <div class="card"><h3>레이트 레지 ${scope('이 이벤트')}</h3>
+        ${numRow('data-ev', 'lateRegLevel', ev.lateRegLevel || 0, '마감 레벨', '이 레벨이 끝나면 마감 · 0 은 설정 안 함', '레벨')}
+        ${evChk(ev, 'lateRegBlock', '마감 후 등록 막기', '끄면 마감 표시만 하고 등록은 받습니다')}
+        <p class="muted small" style="margin:6px 0 0">지금: ${late == null ? '설정 안 함' : late ? '진행 중 (' + F.levelLabel(ev, F.clockOf(ev).idx) + ')' : '마감'}</p>
+      </div>
+      <div class="card"><h3>엔트리 번호 ${scope('이 이벤트')}</h3>
+        ${numRow('data-ev', 'nextEntryNo', ev.nextEntryNo || 1, '다음 엔트리 번호', '다른 곳에서 먼저 받은 참가자가 있으면 이어서 시작', '번', 1)}
+        ${numRow('data-ev', 'buyIn', ev.buyIn || 0, '바이인', '등록 시 기록되는 금액 (상금 풀 계산에 사용)', '원')}
+      </div>`;
+    } else if (sec === 'table') {
+      const strays = L.playersOnDisabledSeats(s, ev.id);
+      body = `
+      <div class="card"><h3>좌석 번호 사용 ${scope('이 이벤트의 모든 테이블')}</h3>
+        <p class="muted small" style="margin:0 0 4px">좌석을 누르면 사용 / 사용 안함이 바뀝니다. 사용 안함 좌석에는 배정하지 않습니다.</p>
+        ${seatTableHtml(s, ev)}
+        ${strays.length ? `<div class="banner warn" style="margin:0"><span class="grow">사용 안함 좌석에 앉아있는 플레이어 ${strays.length}명: ${strays.slice(0, 5).map(p => h(p.name) + ' (' + tableName(s, p.tableId) + ' S' + p.seat + ')').join(', ')}${strays.length > 5 ? ' 외' : ''} · 테이블 탭에서 이동시켜 주세요</span></div>` : ''}
+      </div>
+      <div class="card"><h3>테이블 ${scope('이 이벤트')}</h3>
+        ${numRow('data-ev', 'seats', ev.seats, '테이블당 좌석', '새로 여는 테이블부터 적용 (2~12)', '석', 2)}
+        ${numRow('data-ev', 'tableStart', ev.tableStart || 1, '테이블 시작 번호', '현장 물리 번호. 다른 이벤트가 쓰는 번호는 건너뜁니다', '번', 1)}
+        ${numRow('data-ev', 'tableEnd', ev.tableEnd || '', '테이블 끝 번호', '비우면 제한 없음', '번', 1)}
+      </div>
+      <div class="card"><h3>자동 처리 ${scope('모든 이벤트 공통')}</h3>
+        ${setChk('autoOpenTable', '빈 좌석이 없으면 새 테이블 자동 오픈', '열리면 딜러도 자동으로 앉습니다')}
+        ${setSel('balanceDiff', '밸런싱 경고 기준', [[2, '인원 차이 2명 이상'], [3, '3명 이상'], [4, '4명 이상']], '자동 밸런싱은 언제나 차이 1명 이하로 맞춥니다')}
+        ${setChk('breakHint', '브레이크 가능 알림', '가장 적은 테이블을 깨도 전원이 앉을 수 있으면 알림')}
+        ${setChk('askKO', '탈락 시 아웃시킨 사람(KO) 묻기')}
+        ${setChk('prizeSheet', '입상자가 탈락하면 바우처 발행 창 띄우기')}
+        ${numRow('data-set', 'defaultSeats', set.defaultSeats || 9, '새 이벤트 기본 좌석 수', '', '석', 2)}
+      </div>`;
+    } else if (sec === 'clock') {
+      body = `
+      <div class="card"><h3>알림 ${scope('모든 이벤트 공통')}</h3>
+        ${setChk('levelBeep', '레벨이 바뀌면 알림음')}
+        ${setSel('warnBeforeMin', '레벨 끝나기 전 미리 알림', [[0, '안 함'], [1, '1분 전'], [2, '2분 전'], [5, '5분 전']])}
+      </div>
+      <div class="card"><h3>전광판 표시 ${scope('모든 이벤트 공통')}</h3>
+        ${setChk('boardAvg', '평균 스택')}${setChk('boardPool', '상금 풀')}${setChk('boardFirst', '1위 상금')}${setChk('boardBreak', '다음 브레이크까지')}
+      </div>
+      ${blindEditorHtml(s, ev)}`;
+    } else if (sec === 'dealer') {
+      const l = F.live;
+      body = `
+      <div class="card"><h3>딜러 디렉터 ${scope('현장 공통')}</h3>
+        <p class="muted small" style="margin:0 0 10px">딜러 관리는 DD(dealer-director)를 그대로 씁니다. 로테이션 규칙·교대 간격·음성 안내·딜러 QR·휴대폰·TV 보드는 모두 DD 안에서 정합니다.<br>
+        레지·테이블 탭에서 테이블이 열리고 닫히면 DD 에 자동으로 반영되어 로테이션이 만들어집니다.</p>
+        <div class="list">
+          <div class="list-item"><div class="grow"><div class="t">DD 이벤트</div><div class="s">${l.page === 'event' ? h(l.event.name) + (l.staffing ? ` · 테이블 ${l.staffing.tables} · 근무 ${l.staffing.working} · 휴식 ${l.staffing.onBreak}` : '') : l.page === 'login' ? '로그인 필요' : l.page === 'list' ? '이벤트를 고르지 않음' : '연결 전'}</div></div><a class="btn-link sm" href="#dealers">딜러 탭 열기</a></div>
+          <div class="list-item"><div class="grow"><div class="t">로테이션 설정</div><div class="s">교대 간격, 최대 연속 근무, 최소 휴식, 짧은 근무 기준, 교대 예고, 자동 교대, 음성 안내</div></div><button class="sm ghost" id="ddOpenSettings" ${l.page === 'event' ? '' : 'disabled'}>DD 설정 열기</button></div>
+          <div class="list-item"><div class="grow"><div class="t">딜러 QR · 휴대폰 · TV 보드</div><div class="s">${l.room ? '이 이벤트의 공유가 켜져 있습니다' : 'DD 에서 이벤트를 열면 QR 이 만들어집니다'}</div></div><button class="sm ghost" id="ddOpenShare" ${l.page === 'event' ? '' : 'disabled'}>딜러 QR 열기</button></div>
+        </div>
+      </div>`;
+    } else if (sec === 'event') {
+      body = `${eventFormHtml(ev, false)}
+      <div class="card"><h3>데이터 ${scope('이 브라우저 전체')}</h3><p class="muted small">데이터는 이 브라우저(localStorage)에만 저장됩니다. 다른 기기로 옮기려면 내보내기/가져오기를 사용하세요.</p>
+        <div class="row"><button id="btnExport">내보내기 (JSON)</button><button id="btnImport">가져오기</button><button id="btnCsv">참가자 CSV</button><input type="file" id="importFile" accept="application/json" class="hidden"></div>
+        <div style="margin-top:10px"><button class="danger sm" id="btnReset">전체 초기화</button></div></div>`;
+    } else {
+      const kind = ui.printTab === 'voucher' ? 'voucher' : 'confirm';
+      body = `<div class="row tight" style="margin-bottom:10px">${[['confirm', '참가확인증'], ['voucher', '상금 바우처']].map(([k, lb]) => `<button class="sm ${kind === k ? 'primary' : 'ghost'}" data-ptab="${k}">${lb}</button>`).join('')}<span class="muted small">${scope('모든 이벤트 공통')} 좌석 이동 안내는 참가확인증 용지로 인쇄됩니다</span></div>
+      <div class="card">${tplEditorHtml(kind, s.templates[kind])}</div><div class="preview-wrap" id="preview">${previewHtml(kind)}</div>`;
+    }
+    return `<div class="card set-head"><h2 style="margin:0">설정 <span class="muted small">${h(ev.name)}</span></h2>${nav}</div>${body}`;
+  }
+  function bindSettings(root) {
+    if (!curEvent()) { bindNoEvent(root); return; }
+    const evId = curEvent().id;
+    $$('[data-setsec]', root).forEach(b => b.addEventListener('click', () => { ui.setSec = b.dataset.setsec; render(); }));
+    $$('[data-set]', root).forEach(el => el.addEventListener('change', () => {
+      const k = el.dataset.set; const v = el.type === 'checkbox' ? el.checked : el.type === 'number' || /^\d+$/.test(el.value) ? +el.value : el.value;
+      Store.patch(st => { st.settings[k] = v; }); toast('저장됨', 1200);
+    }));
+    $$('[data-ev]', root).forEach(el => el.addEventListener('change', () => {
+      const k = el.dataset.ev; let v = el.type === 'checkbox' ? el.checked : +el.value || 0;
+      if (k === 'seats') { if (v < 2 || v > 12) { toast('좌석 수는 2~12'); render(); return; } }
+      if (k === 'tableEnd' && v && v < (curEvent().tableStart || 1)) { toast('끝 번호가 시작 번호보다 작습니다'); render(); return; }
+      if (k === 'nextEntryNo') { const used = Math.max(0, ...L.eventPlayers(S(), evId).map(p => p.entryNo)); if (v <= used) { toast('이미 #' + used + '까지 쓰였습니다'); render(); return; } }
+      if (k === 'lateRegLevel') v = Math.max(0, v);
+      Store.commit('설정: ' + (el.closest('.set-row').querySelector('.set-l').firstChild.textContent.trim()), st => { L.eventOf(st, evId)[k] = v; });
+      toast('저장됨 (되돌리기 가능)', 1500);
+    }));
+    $$('[data-dd]', root).forEach(el => el.addEventListener('change', () => {
+      const k = el.dataset.dd; let v = el.type === 'checkbox' ? el.checked : Math.max(0, +el.value || 0);
+      if (k === 'pushMinutes') v = Math.max(5, Math.round(v / 5) * 5 || 20);
+      Store.patch(st => F.setDD(st, { [k]: v })); toast('저장됨', 1200);
+    }));
+    $$('[data-evseat]', root).forEach(b => b.addEventListener('click', () => {
+      Store.commit('좌석 번호 사용 변경', st => L.toggleEventSeat(st, evId, +b.dataset.evseat));
+    }));
+    const os = $('#ddOpenSettings', root); if (os) os.addEventListener('click', () => { location.hash = '#dealers'; setTimeout(F.openSettings, 50); });
+    const osh = $('#ddOpenShare', root); if (osh) osh.addEventListener('click', () => { location.hash = '#dealers'; setTimeout(F.openShare, 50); });
+    if ($('#lvAdd', root)) bindBlindEditor(root, evId);
+    bindEventForm(root, false);
+    $$('[data-ptab]', root).forEach(b => b.addEventListener('click', () => { ui.printTab = b.dataset.ptab; render(); }));
+    const tf = $('.tpl-form', root);
+    if (tf) {
+      const kind = tf.dataset.kind;
+      const read = () => { const fd = new FormData(tf); const o = {}; ['title', 'subtitle', 'logoText', 'paper', 'footer'].forEach(k => o[k] = fd.get(k) || ''); $$('input[type=checkbox]', tf).forEach(c => o[c.name] = c.checked); return o; };
+      tf.addEventListener('input', () => { Object.assign(S().templates[kind], read()); $('#preview').innerHTML = previewHtml(kind); });
+      tf.addEventListener('change', () => { Store.patch(st => Object.assign(st.templates[kind], read())); });
+      $('[data-testprint]', tf).addEventListener('click', () => { const tpl = S().templates[kind]; Print.print(previewHtml(kind), tpl.paper); });
+    }
+    if ($('#btnExport', root)) {
       const download = (text, name, type) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); };
       $('#btnExport', root).addEventListener('click', () => download(Store.exportJSON(), 'holdem-td-' + new Date().toISOString().slice(0, 10) + '.json', 'application/json'));
       $('#btnCsv', root).addEventListener('click', () => {
@@ -653,38 +1030,125 @@ const App = (() => {
         r.onload = () => { try { Store.importJSON(r.result); toast('가져오기 완료'); } catch (err) { toast('가져오기 실패: ' + err.message); } };
         r.readAsText(f);
       });
-      $('#btnReset', root).addEventListener('click', () => { if (confirm('모든 이벤트/참가자/테이블/바우처를 삭제합니다. 계속할까요?') && confirm('정말로 초기화할까요? (되돌리기 1회 가능)')) { Store.reset(); toast('초기화됨'); } });
+      $('#btnReset', root).addEventListener('click', async () => { if (await confirmBox('모든 이벤트/참가자/테이블/바우처를 삭제합니다. 계속할까요?', '계속', true) && await confirmBox('정말로 초기화할까요? (되돌리기 1회 가능)', '초기화', true)) { Store.reset(); toast('초기화됨'); location.hash = '#home'; } });
     }
   }
-  function printVoucher(id) {
-    const s = S(); const v = (s.vouchers || []).find(x => x.id === id); if (!v) return;
-    const tpl = s.templates.voucher; Print.print(Print.voucherHtml(tpl, { voucher: v, event: L.eventOf(s, v.eventId) }), tpl.paper);
+
+  /* ---------- 블라인드 구조 편집 (설정 > 클락) ---------- */
+  function blindEditorHtml(s, ev) {
+    const lv = F.levels(ev), c = F.clockOf(ev); let n = 0;
+    return `<div class="card" style="margin-top:12px">
+      <div class="row tight" style="margin-bottom:8px"><h3 style="margin:0">블라인드 구조</h3><span class="muted small">${h(ev.name)} 전용</span><span style="flex:1"></span>
+        <button class="sm ghost" id="lvAdd">레벨 추가</button><button class="sm ghost" id="brkAdd">브레이크 추가</button><button class="sm ghost" id="lvDefault">기본 구조로</button></div>
+      <div class="row tight" style="margin-bottom:10px"><span class="muted small">한꺼번에</span><label class="chk">레벨 <input type="number" min="1" id="allLvMin" placeholder="분" style="width:70px;padding:5px 8px">분</label><button class="sm ghost" id="allLvApply">모든 레벨에 적용</button><label class="chk">브레이크 <input type="number" min="1" id="allBrkMin" placeholder="분" style="width:70px;padding:5px 8px">분</label><button class="sm ghost" id="allBrkApply">모든 브레이크에 적용</button></div>
+      <div style="overflow-x:auto"><table class="tbl lv-tbl"><tr><th>레벨</th><th>스몰</th><th>빅</th><th>BB 앤티</th><th>시간(분)</th><th></th></tr>
+      ${lv.map((l, i) => { if (!l.brk) n++; const cur = i === c.idx; return `<tr class="${cur ? 'cur' : ''}">
+        <td>${l.brk ? '<span class="chip warn">브레이크</span>' : 'Lv ' + n}${cur ? ' <span class="chip ok">진행</span>' : ''}</td>
+        ${l.brk ? '<td colspan="3" class="muted small">휴식</td>' : ['sb', 'bb', 'ante'].map(k => `<td><input type="number" min="0" value="${l[k]}" data-lv="${i}" data-k="${k}"></td>`).join('')}
+        <td><input type="number" min="1" value="${l.min}" data-lv="${i}" data-k="min" style="width:70px"></td>
+        <td class="nowrap"><button class="sm ghost" data-goto="${i}">이 레벨로</button><button class="sm ghost" data-dellv="${i}">삭제</button></td></tr>`; }).join('')}
+      </table></div>
+    </div>`;
+  }
+  function bindBlindEditor(root, evId) {
+    const editLv = (label, fn) => Store.commit(label, st => { const e = L.eventOf(st, evId); F.ensure(e); return fn(e); });
+    $('#lvAdd', root).addEventListener('click', () => editLv('레벨 추가', e => { const last = e.levels.slice().reverse().find(l => !l.brk) || { sb: 100, bb: 200, ante: 200, min: 20 }; e.levels.push({ sb: last.sb * 2, bb: last.bb * 2, ante: last.ante * 2, min: last.min }); }));
+    $('#brkAdd', root).addEventListener('click', () => editLv('브레이크 추가', e => { e.levels.push({ brk: true, min: 10 }); }));
+    $('#lvDefault', root).addEventListener('click', async () => { if (await confirmBox('블라인드 구조를 기본값(20분 레벨, 10분 브레이크)으로 바꿀까요?', '기본값으로')) editLv('블라인드 기본 구조', e => { e.levels = F.defaultLevels(); e.clock.idx = Math.min(e.clock.idx, e.levels.length - 1); }); });
+    $$('[data-dellv]', root).forEach(b => b.addEventListener('click', () => editLv('레벨 삭제', e => {
+      if (e.levels.length <= 1) return false; const i = +b.dataset.dellv; e.levels.splice(i, 1);
+      if (e.clock.idx > i) e.clock.idx--; if (e.clock.idx >= e.levels.length) F.setLevel(e, e.levels.length - 1);
+    })));
+    $$('[data-goto]', root).forEach(b => b.addEventListener('click', () => clockPatch(e => F.setLevel(e, +b.dataset.goto))));
+    $$('input[data-lv]', root).forEach(inp => inp.addEventListener('change', () => {
+      const v = +inp.value; if (!isFinite(v) || v < 0) return;
+      editLv('블라인드 수정', e => { const i = +inp.dataset.lv, k = inp.dataset.k; e.levels[i][k] = v; if (k === 'min' && i === e.clock.idx && !e.clock.running) e.clock.remain = Math.min(e.clock.remain, v * 60000); });
+    }));
+    $('#allLvApply', root).addEventListener('click', () => { const m = +$('#allLvMin', root).value; if (!(m > 0)) { toast('분을 입력하세요'); return; } editLv('레벨 시간 일괄 변경', e => { e.levels.forEach(l => { if (!l.brk) l.min = m; }); if (!e.clock.running && !e.levels[e.clock.idx].brk) e.clock.remain = m * 60000; }); });
+    $('#allBrkApply', root).addEventListener('click', () => { const m = +$('#allBrkMin', root).value; if (!(m > 0)) { toast('분을 입력하세요'); return; } editLv('브레이크 시간 일괄 변경', e => { e.levels.forEach(l => { if (l.brk) l.min = m; }); if (!e.clock.running && e.levels[e.clock.idx].brk) e.clock.remain = m * 60000; }); });
   }
 
   /* ---------- 렌더 루프 ---------- */
-  const VIEWS = { reg: [viewReg, bindReg], tables: [viewTables, bindTables], events: [viewEvents, bindEvents], print: [viewPrint, bindPrint] };
+  const VIEWS = { reg: [viewReg, bindReg], tables: [viewTables, bindTables], clock: [viewClock, bindClock], dealers: [viewDealers, bindDealers], events: [viewEvents, bindEvents], home: [viewEvents, bindEvents], print: [viewPrint, bindPrint], settings: [viewSettings, bindSettings] };
   /** 데스크톱에서 탭바를 상단바 바로 아래에 고정하기 위한 높이 측정 */
   function syncTopbarHeight() {
     const tb = $('#topbar'); if (!tb) return;
     document.documentElement.style.setProperty('--topbarH', tb.offsetHeight + 'px');
   }
+  /** 앱 문(로그인 전): 승인된 DD 계정으로 로그인해야만 쓸 수 있다. 링크를 열자마자 DD 로그인 화면(iframe)이 뜨고, 로그인하면 이벤트 목록으로 */
+  function gateHtml(g) {
+    if (g === 'boot') return ui.ddFail
+      ? `<div class="banner warn gate-line"><span class="grow">딜러 디렉터를 불러오지 못했습니다. 인터넷 연결을 확인하고 새로 고쳐 주세요.</span><button class="sm" onclick="location.reload()">새로 고침</button></div>`
+      : `<div class="gate-line muted small">계정을 확인하는 중입니다.</div>`;
+    if (g === 'blocked') return `<div class="gate-line muted small">계정 상태를 확인해 주세요. 아래 안내대로 다시 로그인하거나 판매자에게 문의하세요.</div>`;
+    return `<div class="gate-line muted small">승인된 계정으로 로그인하면 이벤트 목록이 열립니다.</div>`;
+  }
   function render() {
     renderTop();
-    const v = VIEWS[ui.tab] || VIEWS.reg;
-    const root = $('#view'); root.innerHTML = v[0](); v[1](root);
+    if (ui.tab !== 'home' && !curEvent()) ui.tab = 'home';
+    const gate = F.gate();
+    document.body.classList.toggle('at-home', ui.tab === 'home');
+    document.body.classList.toggle('at-gate', gate !== 'ok');
+    document.body.classList.toggle('at-dealers', ui.tab === 'dealers');
+    $('#ddFrame').hidden = !(ui.tab === 'dealers' || gate !== 'ok');
+    const root = $('#view');
+    if (gate !== 'ok') { root.innerHTML = gateHtml(gate); $$('#tabbar a').forEach(a => a.classList.remove('active')); syncTopbarHeight(); return; }
+    const v = VIEWS[ui.tab] || VIEWS.home;
+    root.innerHTML = v[0](); v[1](root);
     $$('#tabbar a').forEach(a => a.classList.toggle('active', a.dataset.tab === ui.tab));
+    if (!$('#board').classList.contains('hidden')) { $('#board').innerHTML = boardHtml(); $('#bdClose').addEventListener('click', closeBoard); }
+    paintClock();
     syncTopbarHeight();
   }
+  /* ---------- 새 버전 알림 ----------
+     빌드가 없으므로 버전 번호 대신 배포된 파일의 ETag/Last-Modified 를 HEAD 요청으로 2분마다(탭을 다시 볼 때도) 비교한다.
+     하나라도 바뀌면 "업데이트가 있습니다. 새로고침을 눌러주세요" 토스트(#updateToast)를 누를 때까지 띄운다 (2026-10-13 사용자 요청).
+     file:// 나 HEAD 를 안 받는 서버에서는 도장이 안 찍혀 조용히 아무것도 하지 않는다. */
+  const UPDATE_FILES = ['index.html', 'css/app.css', 'js/store.js', 'js/logic.js', 'js/floor.js', 'js/print.js', 'js/app.js', 'dd/index.html', 'dd/js/app.js', 'dd/js/engine.js', 'dd/js/phoneview.js', 'dd/css/td-theme.css'];
+  async function fileStamps() {
+    const out = {};
+    await Promise.all(UPDATE_FILES.map(async f => {
+      try {
+        const r = await fetch(f, { method: 'HEAD', cache: 'no-store' }); if (!r.ok) return;
+        const st = r.headers.get('etag') || r.headers.get('last-modified'); if (st) out[f] = st;
+      } catch (e) { /* 오프라인·file:// */ }
+    }));
+    return out;
+  }
+  function watchUpdates() {
+    if (!/^https?:$/.test(location.protocol)) return;
+    let base = null, found = false;
+    const check = async () => {
+      if (found || document.hidden) return;
+      const now = await fileStamps();
+      if (!base) { base = now; return; }
+      const changed = Object.keys(base).filter(f => now[f] && now[f] !== base[f]);
+      if (!changed.length) return;
+      found = true; $('#updateToast').hidden = false;
+    };
+    $('#btnReloadApp').addEventListener('click', () => location.reload());
+    setTimeout(check, 3000);
+    setInterval(check, 120000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+  }
+
   function init() {
     Store.subscribe(render);
-    window.addEventListener('hashchange', () => { ui.tab = (location.hash || '#reg').slice(1); ui.moveMode = null; render(); });
+    watchUpdates();
+    window.addEventListener('hashchange', () => { ui.tab = (location.hash || '#home').slice(1); ui.moveMode = null; render(); });
     $('#eventSelect').addEventListener('change', (e) => { Store.patch(st => st.selectedEventId = e.target.value || null); ui.regSeat = null; ui.moveMode = null; });
     $('#btnUndo').addEventListener('click', () => { const l = Store.undo(); if (l) toast('되돌림: ' + l); });
+    $('#btnHome').addEventListener('click', () => { ui.eventEdit = null; location.hash = '#home'; });
     $('#btnRedo').addEventListener('click', () => { const l = Store.redo(); if (l) toast('다시 실행: ' + l); });
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); e.shiftKey ? Store.redo() : Store.undo(); }
     });
     window.addEventListener('resize', syncTopbarHeight);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#board').classList.contains('hidden')) closeBoard(); });
+    setInterval(tick, 500);
+    ui.bootAt = Date.now(); ui.gate = 'boot'; ui.gateWas = 'boot';
+    $('#ddFrame').src = F.frameSrc(S()); // DD 는 탭과 무관하게 항상 떠 있다 (교대 시계·휴대폰 공유). 로그인 전에는 앱 문 역할
+    F.onLive(onDdLive);
     if (!S().selectedEventId && S().events.length) Store.patch(st => st.selectedEventId = st.events[0].id);
     render();
   }

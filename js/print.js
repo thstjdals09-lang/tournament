@@ -72,6 +72,25 @@ const Print = (() => {
     return wrap(inner, tpl.paper);
   }
 
+
+  /** 좌석 이동 안내 (참가확인증 템플릿·용지를 그대로 쓴다). 한 명당 한 장 */
+  function moveHtml(tpl, ctx) {
+    const { moves, event } = ctx;
+    const pz = PAPER[tpl.paper] || PAPER.A5;
+    return moves.map(m => {
+      const rows = [
+        ['이벤트', esc(event ? event.name : '')],
+        ['플레이어', esc(m.player.name) + (m.player.entryNo ? ' #' + m.player.entryNo : '')],
+        ['이전 자리', 'T' + m.fromNumber + ' S' + m.from.seat],
+        ['새 자리', `<span style="font-size:${pz.font * 1.6}px;font-weight:900">T${m.toNumber} &nbsp;S${m.to.seat}</span>`],
+        ['이동 시각', fmtTime(Date.now())],
+      ];
+      const inner = head(Object.assign({}, tpl, { title: '좌석 이동 안내' }), tpl.paper) + rowsHtml(rows, pz.font) +
+        `<div style="border-top:1px dashed #000;margin:10px 0"></div><div style="font-size:${pz.font * 0.85}px;color:#444">칩을 모두 가지고 새 자리로 이동해 주세요.</div>`;
+      return `<div style="page-break-after:always">${wrap(inner, tpl.paper)}</div>`;
+    }).join('');
+  }
+
   /** 실제 인쇄 */
   function print(html, sizeKey) {
     const pz = PAPER[sizeKey] || PAPER.A5;
@@ -92,5 +111,5 @@ const Print = (() => {
     voucher: { serial: 'V0007', playerName: '홍길동', rank: 2, amount: 1250000, note: '', issuedAt: Date.now() },
   });
 
-  return { confirmHtml, voucherHtml, print, sample, fmtMoney, fmtTime, esc, PAPER };
+  return { moveHtml, confirmHtml, voucherHtml, print, sample, fmtMoney, fmtTime, esc, PAPER };
 })();

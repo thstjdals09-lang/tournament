@@ -9,6 +9,8 @@
 <body>
 <header id="topbar">
   <div class="topbar-row">
+    <button id="btnHome" class="home-btn">이벤트 목록</button>
+    <span class="home-title">Holdem TD</span>
     <select id="eventSelect" class="event-select" title="이벤트 선택"></select>
     <div class="hist-btns">
       <button id="btnUndo" title="되돌리기">되돌리기</button>
@@ -19,20 +21,30 @@
 </header>
 
 <main id="view"></main>
+<!-- 딜러 탭 = dealer-director 앱 통째로 (dd/). 탭을 옮겨도 내려가지 않게 #view 밖에 둔다 (교대 시계·휴대폰 공유가 계속 돈다) -->
+<iframe id="ddFrame" class="dd-frame" title="딜러 디렉터" hidden></iframe>
 
 <nav id="tabbar">
   <a href="#reg" data-tab="reg">등록</a>
   <a href="#tables" data-tab="tables">테이블</a>
-  <a href="#events" data-tab="events">이벤트</a>
+  <a href="#clock" data-tab="clock">클락</a>
+  <a href="#dealers" data-tab="dealers">딜러</a>
+  <a href="#events" data-tab="events">현황</a>
   <a href="#print" data-tab="print">용지</a>
+  <a href="#settings" data-tab="settings">설정</a>
 </nav>
 
 <div id="toast"></div>
+<div id="updateToast" class="update-toast" hidden><span>업데이트가 있습니다. 새로고침을 눌러주세요.</span><button class="sm primary" id="btnReloadApp">새로고침</button></div>
+<!-- 앱 안의 확인창 (브라우저 confirm/prompt 대신 — App.ask) -->
+<dialog id="dlg" class="dlg"><form method="dialog"><div class="dlg-title"></div><div class="dlg-text"></div><div class="dlg-fields"></div><div class="dlg-btns"><button type="button" class="ghost dlg-cancel" onclick="this.closest('dialog').close('')">취소</button><button type="submit" value="ok" class="primary">확인</button></div></form></dialog>
 <div id="sheet" class="sheet hidden"></div>
 <div id="print-root"></div>
+<div id="board" class="board hidden"></div>
 
 <script src="js/store.js"></script>
 <script src="js/logic.js"></script>
+<script src="js/floor.js"></script>
 <script src="js/print.js"></script>
 <script src="js/app.js"></script>
 </body>
