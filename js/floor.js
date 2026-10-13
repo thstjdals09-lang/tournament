@@ -1,4 +1,4 @@
-/* 플로어 운영 로직: 토너먼트 클락(이벤트별 블라인드 구조) + 딜러 관리(현장 공통) */
+/* 플로어 운영 로직: 토너먼트 클락(이벤트별 블라인드 구조) + 딜러 관리(현장 공통, dealer-director 엔진 연결) */
 const Floor = (() => {
   /* ---------- 블라인드 구조 / 클락 ---------- */
   const DEF = [[100,200,200],[200,300,300],[200,400,400],[300,600,600],[400,800,800],'B',[500,1000,1000],[600,1200,1200],[800,1600,1600],[1000,2000,2000],[1200,2400,2400],'B',[1500,3000,3000],[2000,4000,4000],[2500,5000,5000],[3000,6000,6000],[4000,8000,8000],'B',[5000,10000,10000],[6000,12000,12000],[8000,16000,16000],[10000,20000,20000],[15000,30000,30000],[20000,40000,40000],[25000,50000,50000],[30000,60000,60000]];
@@ -56,53 +56,52 @@ const Floor = (() => {
     return changed;
   }
 
-  /* ---------- 딜러 (현장 공통, 테이블 id 로 배정) ---------- */
-  const dealers = (s) => s.dealers || (s.dealers = []);
-  const cfg = (s) => s.dealerCfg || (s.dealerCfg = { pushMin: 30, lastPush: null, autoAssign: true });
-  const dealerAt = (s, tableId) => (s.dealers || []).find(d => d.status === 'working' && d.tableId === tableId) || null;
-  /** 현장의 모든 오픈 테이블 (이벤트 무관, 번호순) */
-  const floorTables = (s) => s.tables.filter(t => t.status === 'open').sort((a, b) => a.number - b.number);
-  const workedMs = (d) => (d.workMs || 0) + (d.status === 'working' ? Date.now() - d.workStart : 0);
-
-  function addDealer(s, name) { const d = { id: Store.uid(), name, status: 'break', tableId: null, since: Date.now(), workMs: 0, workStart: null }; dealers(s).push(d); return d; }
-  function assign(s, d, tableId) {
-    const cur = dealerAt(s, tableId); if (cur && cur !== d) release(s, cur, 'break');
-    if (d.status !== 'working') d.workStart = Date.now();
-    d.status = 'working'; d.tableId = tableId; d.since = Date.now();
+  /* ---------- 딜러: dealer-director(DD) 엔진에 맡긴다 (현장 공통 state.dd) ----------
+     DD 테이블 id 는 't'+번호. Holdem TD 의 열린 테이블 번호와 DD 의 열린 테이블을 sync 로 맞추면
+     DD 가 공석 테이블에 쉬는 딜러를 자동으로 앉히고(fillVacancies), 깨진 테이블 딜러는 휴식으로 돌린다. */
+  const DE = (typeof DealerEngine !== 'undefined') ? DealerEngine : null;
+  const dd = (s) => { if (!s.dd) s.dd = DE.createState(); return s.dd; };
+  const ddTableId = (no) => 't' + no;
+  /** TD 의 열린 테이블 번호 ↔ DD 열린 테이블을 맞춘다. Store.commit 마다 호출 */
+  function sync(s, now) {
+    if (!DE) return;
+    now = now || Date.now();
+    const tdOpen = Array.from(new Set(s.tables.filter(t => t.status === 'open').map(t => t.number))).sort((a, b) => a - b);
+    let d = dd(s);
+    const ddOpen = DE.activeTables(d).map(t => t.no);
+    ddOpen.filter(no => !tdOpen.includes(no)).forEach(no => { d = DE.closeTable(d, ddTableId(no), now); });
+    const toOpen = tdOpen.filter(no => !ddOpen.includes(no));
+    if (toOpen.length) d = DE.openTable(d, toOpen, now);
+    s.dd = d;
   }
-  function release(s, d, status) {
-    if (d.status === 'working') d.workMs = (d.workMs || 0) + (Date.now() - d.workStart);
-    d.status = status; d.tableId = null; d.since = Date.now();
+  /** TD 테이블(id)에 앉은 DD 딜러 */
+  function dealerAt(s, tableId) {
+    const t = s.tables.find(x => x.id === tableId); if (!t || !s.dd) return null;
+    const dt = DE.tableOf(s.dd, ddTableId(t.number));
+    return dt && dt.status === 'open' && dt.dealerId ? DE.dealerOf(s.dd, dt.dealerId) : null;
   }
-  /** 닫힌 테이블에 남은 딜러는 휴식으로 */
-  function releaseClosed(s) { (s.dealers || []).forEach(d => { if (d.status === 'working') { const t = s.tables.find(x => x.id === d.tableId); if (!t || t.status !== 'open') release(s, d, 'break'); } }); }
-  /**
-   * 푸시: 가장 오래 쉰 딜러부터 첫 테이블에 들어가고, 앉아 있던 딜러는 한 테이블씩 뒤로 밀린다.
-   * 테이블 수보다 남는 딜러(맨 뒤 테이블에서 밀려난 딜러)는 휴식.
-   */
-  function push(s) {
-    releaseClosed(s);
-    const ts = floorTables(s);
-    const rested = dealers(s).filter(d => d.status === 'break').sort((a, b) => a.since - b.since);
-    const seq = rested.concat(ts.map(t => dealerAt(s, t.id)).filter(Boolean));
-    const moves = [];
-    seq.slice(ts.length).forEach(d => { release(s, d, 'break'); moves.push({ dealer: d, to: null }); });
-    ts.forEach((t, i) => { const d = seq[i]; if (d) { assign(s, d, t.id); moves.push({ dealer: d, to: t }); } });
-    cfg(s).lastPush = Date.now();
-    return moves;
+  const dealers = (s) => (s.dd ? s.dd.dealers : []);
+  const run = (s, fn) => { s.dd = fn(dd(s), Date.now()); };
+  /** 이름(쉼표·줄바꿈 구분)으로 출근. 퇴근했던 사람은 복귀 */
+  const attend = (s, text) => run(s, (d, now) => String(text).split(/[,\n\t]+/).map(x => x.trim()).filter(Boolean).reduce((acc, name) => DE.attend(acc, name, now, true), d));
+  const sendHome = (s, id) => run(s, (d, now) => DE.sendHome(d, id, now));
+  const checkBack = (s, id) => run(s, (d, now) => DE.checkBack(d, id, now));
+  const toggleHold = (s, id) => run(s, (d, now) => DE.toggleHold(d, id, now));
+  const assign = (s, tableNo, id) => run(s, (d, now) => DE.assignDealer(d, ddTableId(tableNo), id, now));
+  const relieve = (s, tableNo) => run(s, (d, now) => DE.relieveTable(d, ddTableId(tableNo), now));
+  function rotate(s) { // 시작 전이면 로테이션 시작, 진행 중이면 지금 교대
+    const d = dd(s), now = Date.now();
+    if (!d.clock.running) { s.dd = DE.startClock(d, now); return null; }
+    const r = DE.executePush(d, now); s.dd = r.state; return r.plan;
   }
-  /**
-   * 테이블이 열릴 때 딜러 자동 배치: 그 테이블에 딜러가 없으면 가장 오래 쉰 딜러를 앉힌다.
-   * dealer-director(DD) 의 배치 규칙으로 바꿀 때는 이 함수만 교체하면 된다.
-   */
-  function autoAssign(s, table) {
-    if (cfg(s).autoAssign === false || !table || table.status !== 'open' || dealerAt(s, table.id)) return null;
-    const d = dealers(s).filter(x => x.status === 'break').sort((a, b) => a.since - b.since)[0];
-    if (!d) return null;
-    assign(s, d, table.id); return d;
-  }
-  const nextPushIn = (s) => cfg(s).lastPush ? cfg(s).lastPush + cfg(s).pushMin * 60000 - Date.now() : null;
+  const togglePause = (s) => run(s, (d, now) => d.clock.paused ? DE.resumeClock(d, now) : DE.pauseClock(d, now));
+  const setPushMinutes = (s, m) => run(s, (d, now) => DE.updateSettings(d, { pushMinutes: m }, now));
+  const nextPushIn = (s) => s.dd ? DE.msToPush(s.dd, Date.now()) : null;
+  /** 자동 교대 시각이 됐나 */
+  const pushDue = (s) => { const d = s.dd; return !!(d && d.clock.running && !d.clock.paused && d.settings.autoPush && DE.msToPush(d, Date.now()) <= 0); };
+  const planNext = (s) => s.dd && s.dd.clock.running ? DE.planPush(s.dd, Date.now()) : null;
+  const seatedMin = (s, d) => Math.max(0, Math.floor((DE.clockNow(s.dd, Date.now()) - d.since) / 60000));
 
   return { defaultLevels, levels, clockOf, ensure, remain, levelNo, levelLabel, blindText, mmss, currentBB, breakIn, lateRegOpen, start, pause, setLevel, addTime, advance,
-    dealers, cfg, dealerAt, floorTables, workedMs, addDealer, assign, release, releaseClosed, push, nextPushIn, autoAssign };
+    DE, dd, sync, dealerAt, dealers, attend, sendHome, checkBack, toggleHold, assign, relieve, rotate, togglePause, setPushMinutes, nextPushIn, pushDue, planNext, seatedMin };
 })();

@@ -262,7 +262,7 @@ const App = (() => {
     }
     const open = t.status === 'open';
     return `<div class="table-card ${open ? '' : 'closed'} ${!usable && open ? 'disabled' : ''}" data-tcard="${t.id}" id="tcard-${t.number}">
-      <div class="table-head"><span class="name">T${t.number}</span><span class="cnt">${players.length}/${L.usableSeats(s, t)}</span>${open ? (usable ? '' : '<span class="chip warn">사용 안함</span>') : '<span class="chip">닫힘</span>'}<span class="sp"></span>
+      <div class="table-head"><span class="name">T${t.number}</span><span class="cnt">${players.length}/${L.usableSeats(s, t)}</span>${open ? (() => { const dl = Floor.dealerAt(s, t.id); return `<span class="chip ${dl ? '' : 'warn'}">${dl ? '딜러 ' + h(dl.name) : '딜러 없음'}</span>`; })() : ''}${open ? (usable ? '' : '<span class="chip warn">사용 안함</span>') : '<span class="chip">닫힘</span>'}<span class="sp"></span>
         ${open ? `<button class="sm ghost" data-close="${t.id}">브레이크</button>` : `<button class="sm ghost" data-reopen="${t.id}">다시 열기</button><button class="sm ghost" data-deltable="${t.id}">삭제</button>`}
       </div>
       <div class="seats">${seats}</div></div>`;
@@ -422,7 +422,7 @@ const App = (() => {
   function doCloseTable(tid) {
     const s = S(); const t = L.tableOf(s, tid); const n = L.tablePlayers(s, tid).length;
     if (!confirm(`T${t.number} 브레이크: ${n}명을 다른 테이블 빈 좌석에 무작위 배치하고 테이블을 닫습니다. 진행할까요?\n(상단 되돌리기로 취소할 수 있습니다)`)) return;
-    let r; Store.commit(`T${t.number} 브레이크`, st => { r = L.closeTable(st, tid); if (r.error) return false; Floor.releaseClosed(st); });
+    let r; Store.commit(`T${t.number} 브레이크`, st => { r = L.closeTable(st, tid); if (r.error) return false; });
     if (r.error) { toast(r.error); return; }
     showMoves(`T${t.number} 브레이크 완료`, r.moves);
   }
@@ -464,7 +464,7 @@ const App = (() => {
     sheet('컨바인 (테이블 합치기)', [{ label: '컨바인 실행', cls: 'primary', fn: () => {
       if (!plan || plan.error || !sel.length) { toast(plan && plan.error ? plan.error : '닫을 테이블을 고르세요'); return 'keep'; }
       let done; const nums = sel.map(id => 'T' + L.tableOf(S(), id).number).join(', ');
-      Store.commit('컨바인: ' + nums, st => { done = L.applyCombine(st, sel, plan.moves); Floor.releaseClosed(st); });
+      Store.commit('컨바인: ' + nums, st => { done = L.applyCombine(st, sel, plan.moves); });
       setTimeout(() => done.length ? showMoves(`${nums} 컨바인`, done) : toast(nums + ' 닫음'), 0);
     } }], body, (el) => {
       $$('[data-cmb]', el).forEach(cb => cb.addEventListener('change', () => {
@@ -750,7 +750,7 @@ const App = (() => {
   const clockPatch = (fn) => { const ev = curEvent(); if (!ev) return; Store.patch(st => { const e = L.eventOf(st, ev.id); F.ensure(e); fn(e); }); };
   function avgStack(s, ev) { const act = L.activePlayers(s, ev.id).length; return act && ev.startChips ? ev.startChips * L.eventPlayers(s, ev.id).length / act : 0; }
   function clockVals(s, ev) {
-    const lv = F.levels(ev), c = F.clockOf(ev), l = lv[c.idx], nx = lv[c.idx + 1], bi = F.breakIn(ev), pin = F.nextPushIn(s);
+    const lv = F.levels(ev), c = F.clockOf(ev), l = lv[c.idx], nx = lv[c.idx + 1], bi = F.breakIn(ev), pin = F.nextPushIn(s), ddc = s.dd && s.dd.clock;
     return {
       level: F.levelLabel(ev, c.idx) + (c.running ? '' : ' · 정지'),
       time: F.mmss(F.remain(c)),
@@ -758,7 +758,7 @@ const App = (() => {
       next: nx ? '다음 ' + (nx.brk ? '브레이크 ' + nx.min + '분' : F.blindText(nx)) : '마지막 레벨',
       toggle: c.running ? '일시정지' : '시작',
       break: l && l.brk ? '브레이크 중' : bi == null ? '-' : F.mmss(bi),
-      push: pin == null ? '기록 없음' : pin <= 0 ? '지금' : F.mmss(pin),
+      push: pin == null ? '로테이션 시작 전' : ddc && ddc.paused ? '일시정지' : pin <= 0 ? '지금' : F.mmss(pin),
       chip: `${F.levelLabel(ev, c.idx).replace('레벨 ', 'Lv')} ${F.mmss(F.remain(c))}${c.running ? '' : ' 정지'}`,
     };
   }
@@ -882,72 +882,73 @@ const App = (() => {
       Store.patch(st => due.forEach(d => { const e = L.eventOf(st, d.id); if (F.advance(e) && e.id === st.selectedEventId) curChanged = true; }));
       if (curChanged) { const ev = curEvent(); beep(); toast(ev.name + ' · ' + F.levelLabel(ev, ev.clock.idx) + ' ' + F.blindText(ev.levels[ev.clock.idx]), 4000); }
     }
+    if (F.pushDue(s)) {
+      let plan; Store.patch(st => { plan = F.rotate(st); });
+      beep(); toast(`딜러 교대 · ${plan ? plan.moves.filter(m => m.toDealerId).length : 0}테이블 바뀜`, 4000);
+    }
     paintClock();
   }
 
-  /* ---------- 딜러 탭 ---------- */
+  /* ---------- 딜러 탭 (dealer-director 엔진) ---------- */
   function viewDealers() {
-    const s = S(); const ds = F.dealers(s), ts = F.floorTables(s), c = F.cfg(s);
-    const order = { working: 0, break: 1, off: 2 };
-    const tnum = (d) => { const t = L.tableOf(s, d.tableId); return t ? t.number : 0; };
-    const list = ds.slice().sort((a, b) => order[a.status] - order[b.status] || tnum(a) - tnum(b) || a.since - b.since);
-    const mins = (ms) => Math.max(0, Math.floor(ms / 60000)) + '분';
+    const s = S(); const d = s.dd || F.DE.createState(); const ds = d.dealers, c = d.clock;
+    const ts = s.tables.filter(t => t.status === 'open').sort((a, b) => a.number - b.number);
     const evName = (t) => { const e = L.eventOf(s, t.eventId); return e ? e.name : ''; };
-    const working = ds.filter(d => d.status === 'working').length, resting = ds.filter(d => d.status === 'break').length;
+    const st = F.DE.staffing(d);
     const empty = ts.filter(t => !F.dealerAt(s, t.id));
+    const plan = F.planNext(s);
+    const changes = plan ? plan.moves.filter(m => m.toDealerId) : [];
+    const nm = (id) => { const x = id && F.DE.dealerOf(d, id); return x ? h(x.name) : '-'; };
+    const tno = (x) => { const t = F.DE.tableOf(d, x.tableId); return t ? t.no : ''; };
+    const order = { working: 0, break: 1, off: 2 };
+    const list = ds.slice().sort((a, b) => order[a.status] - order[b.status] || (tno(a) || 0) - (tno(b) || 0) || a.since - b.since);
+    const state = !c.running ? '<span class="chip">시작 전</span>' : c.paused ? '<span class="chip warn">일시정지</span>' : '<span class="chip ok">진행 중</span>';
     return `
-    ${empty.length && ds.length ? `<div class="banner warn"><span class="grow">딜러 없는 테이블 ${empty.length}개: ${empty.slice(0, 12).map(t => 'T' + t.number).join(', ')}${empty.length > 12 ? ' 외' : ''}</span></div>` : ''}
+    ${empty.length && ds.length ? `<div class="banner warn"><span class="grow">딜러 없는 테이블 ${empty.length}개: ${empty.slice(0, 12).map(t => 'T' + t.number).join(', ')}${empty.length > 12 ? ' 외' : ''} · 쉬는 딜러가 출근하면 자동으로 앉습니다</span></div>` : ''}
     <div class="card">
-      <div class="row tight" style="margin-bottom:8px"><h2 style="margin:0">딜러 푸시</h2><span class="muted small">현장 전체 오픈 테이블 ${ts.length}개 · 근무 ${working} · 휴식 ${resting}</span></div>
+      <div class="row tight" style="margin-bottom:8px"><h2 style="margin:0">딜러 로테이션</h2>${state}<span class="muted small">Dealer Director 엔진 · 테이블 ${st.tables} · 근무 ${st.working} · 휴식 ${st.onBreak}${st.diff < 0 ? ` · <span class="warn-text">${-st.diff}명 부족</span>` : ''}</span></div>
       <div class="row tight">
-        <button class="primary" id="btnPush">지금 푸시</button>
-        <span class="muted">다음 푸시 <b data-clk="push"></b></span>
-        <label class="chk">주기 <input type="number" min="5" step="5" id="pushMin" value="${c.pushMin}" style="width:70px;padding:5px 8px">분</label>
-        <label class="chk"><input type="checkbox" id="autoDealer" ${c.autoAssign !== false ? 'checked' : ''}>테이블이 열리면 쉬는 딜러 자동 배치</label>
+        <button class="primary" id="ddRotate">${c.running ? '지금 교대' : '로테이션 시작'}</button>
+        ${c.running ? `<button id="ddPause">${c.paused ? '재개' : '일시정지'}</button>` : ''}
+        <span class="muted">다음 교대 <b data-clk="push"></b></span>
+        <label class="chk">교대 간격 <input type="number" min="5" step="5" id="ddEvery" value="${d.settings.pushMinutes}" style="width:70px;padding:5px 8px">분</label>
       </div>
-      <p class="muted small" style="margin:8px 0 0">푸시하면 가장 오래 쉰 딜러가 가장 낮은 번호 테이블로 들어가고, 앉아 있던 딜러는 다음 번호 테이블로 한 칸씩 이동합니다. 테이블보다 많은 딜러는 휴식으로 빠집니다.</p>
+      <p class="muted small" style="margin:8px 0 0">테이블이 열리면 가장 오래 쉰 딜러가 자동으로 앉고, 테이블이 깨지면 그 딜러는 휴식으로 갑니다. 교대 때는 쉰 딜러 수만큼의 테이블만 바뀌고, 앉아 있던 딜러는 다른 테이블로 옮기지 않습니다.</p>
+      ${changes.length ? `<div class="list" style="margin-top:10px">${changes.map(m => `<div class="list-item"><div class="grow"><div class="t">T${F.DE.tableOf(d, m.tableId).no}</div><div class="s">${nm(m.fromDealerId)} → <b>${nm(m.toDealerId)}</b></div></div></div>`).join('')}</div>` : (c.running ? '<p class="muted small" style="margin:8px 0 0">다음 교대에 바뀌는 테이블이 없습니다.</p>' : '')}
     </div>
     <div class="card">
       <h3>테이블별 딜러</h3>
-      ${ts.length ? `<div class="dealer-grid">${ts.map(t => { const d = F.dealerAt(s, t.id); return `<div class="dealer-slot ${d ? '' : 'none'}"><div><b>T${t.number}</b> <span class="muted small">${h(evName(t))}</span></div>
-        <select data-tdealer="${t.id}" class="sm-select"><option value="">딜러 없음</option>${ds.filter(x => x.status !== 'off').map(x => `<option value="${x.id}" ${d && d.id === x.id ? 'selected' : ''}>${h(x.name)}${x.status === 'working' && x !== d ? ' (T' + tnum(x) + ')' : ''}</option>`).join('')}</select>
-        <div class="muted small">${d ? mins(Date.now() - d.since) + '째' : ''}</div></div>`; }).join('')}</div>` : '<div class="muted">열린 테이블이 없습니다.</div>'}
+      ${ts.length ? `<div class="dealer-grid">${ts.map(t => { const cur = F.dealerAt(s, t.id); return `<div class="dealer-slot ${cur ? '' : 'none'}"><div><b>T${t.number}</b> <span class="muted small">${h(evName(t))}</span></div>
+        <select data-tdealer="${t.number}" class="sm-select"><option value="">${cur ? '' : '딜러 없음'}</option>${ds.filter(x => x.status !== 'off').map(x => `<option value="${x.id}" ${cur && cur.id === x.id ? 'selected' : ''}>${h(x.name)}${x.status === 'working' && x !== cur ? ' (T' + tno(x) + ')' : x.status === 'break' ? ' (휴식)' : ''}</option>`).join('')}</select>
+        <div class="row tight"><span class="muted small">${cur ? F.seatedMin(s, cur) + '분째' : ''}</span><span style="flex:1"></span>${cur ? `<button class="sm ghost" data-relieve="${t.number}">지금 교체</button>` : ''}</div></div>`; }).join('')}</div>` : '<div class="muted">열린 테이블이 없습니다. 등록하거나 테이블을 열면 여기에 나타납니다.</div>'}
     </div>
     <div class="card">
-      <div class="row tight" style="margin-bottom:8px"><h3 style="margin:0">딜러 명단 <span class="muted small">${ds.length}명</span></h3></div>
-      <form id="dealerForm" class="row tight" style="margin-bottom:10px" autocomplete="off"><input name="name" placeholder="딜러 이름" style="flex:1;min-width:160px"><button class="primary" type="submit">추가</button></form>
-      <div class="list">${list.map(d => `<div class="list-item"><div class="grow"><div class="t">${h(d.name)} ${d.status === 'working' ? `<span class="chip ok">T${tnum(d)} 근무</span>` : d.status === 'break' ? '<span class="chip warn">휴식</span>' : '<span class="chip">퇴근</span>'}</div>
-        <div class="s">현재 상태 ${mins(Date.now() - d.since)} · 총 근무 ${(F.workedMs(d) / 3600000).toFixed(1)}시간</div></div>
-        ${d.status === 'working' ? `<button class="sm ghost" data-dstat="${d.id}" data-s="break">휴식</button>` : ''}
-        ${d.status === 'off' ? `<button class="sm ghost" data-dstat="${d.id}" data-s="break">출근</button>` : `<button class="sm ghost" data-dstat="${d.id}" data-s="off">퇴근</button>`}
-        <button class="sm ghost" data-ddel="${d.id}">삭제</button></div>`).join('') || '<div class="muted">등록된 딜러가 없습니다. 이름을 입력해 추가하세요.</div>'}</div>
+      <div class="row tight" style="margin-bottom:8px"><h3 style="margin:0">출근 <span class="muted small">${ds.filter(x => x.status !== 'off').length}명 근무 중</span></h3></div>
+      <form id="dealerForm" class="row tight" style="margin-bottom:10px" autocomplete="off"><input name="name" placeholder="딜러 이름 (여러 명은 쉼표로)" style="flex:1;min-width:180px"><button class="primary" type="submit">출근</button></form>
+      <div class="list">${list.map(x => `<div class="list-item"><div class="grow"><div class="t">${h(x.name)} ${x.status === 'working' ? `<span class="chip ok">T${tno(x)} 근무</span>` : x.status === 'break' ? (x.hold ? '<span class="chip">보류</span>' : '<span class="chip warn">휴식</span>') : '<span class="chip">퇴근</span>'}</div>
+        <div class="s">${x.status === 'working' ? `이 자리 ${F.seatedMin(s, x)}분` : x.status === 'break' ? `휴식 ${Math.floor(F.DE.restedMs(x, Date.now()) / 60000)}분` : '퇴근'}</div></div>
+        ${x.status === 'break' ? `<button class="sm ghost" data-dhold="${x.id}">${x.hold ? '보류 해제' : '투입 보류'}</button>` : ''}
+        ${x.status === 'off' ? `<button class="sm ghost" data-dback="${x.id}">복귀</button>` : `<button class="sm ghost" data-dhome="${x.id}">퇴근</button>`}</div>`).join('') || '<div class="muted">출근한 딜러가 없습니다. 이름을 입력해 출근시키세요.</div>'}</div>
     </div>`;
   }
   function bindDealers(root) {
-    const dOf = (st, id) => F.dealers(st).find(d => d.id === id);
-    $('#btnPush', root).addEventListener('click', () => {
-      if (!F.dealers(S()).some(d => d.status !== 'off')) { toast('근무 가능한 딜러가 없습니다'); return; }
-      let moves; Store.commit('딜러 푸시', st => { moves = F.push(st); });
-      const s = S();
-      sheet(`딜러 푸시 완료 (${moves.length}명)`, [{ label: '되돌리기', cls: 'ghost', fn: () => { Store.undo(); toast('되돌렸습니다'); } }],
-        `<div class="list" style="margin-bottom:12px">${moves.map(m => `<div class="list-item"><div class="grow"><div class="t">${h(m.dealer.name)}</div><div class="s">${m.to ? '→ <b>T' + m.to.number + '</b>' : '→ 휴식'}</div></div></div>`).join('')}</div>`);
-      void s;
+    const dd = (label, fn) => Store.commit(label, st => { fn(st); });
+    $('#ddRotate', root).addEventListener('click', () => {
+      const running = S().dd && S().dd.clock.running;
+      let plan; dd(running ? '딜러 교대' : '로테이션 시작', st => { plan = F.rotate(st); });
+      toast(running ? `교대 · ${plan ? plan.moves.filter(m => m.toDealerId).length : 0}테이블 바뀜` : '로테이션을 시작했습니다');
     });
-    $('#autoDealer', root).addEventListener('change', (e) => Store.patch(st => { F.cfg(st).autoAssign = e.target.checked; }));
-    $('#pushMin', root).addEventListener('change', (e) => Store.patch(st => { F.cfg(st).pushMin = Math.max(1, +e.target.value || 30); }));
-    $$('[data-tdealer]', root).forEach(sel => sel.addEventListener('change', () => {
-      const tid = sel.dataset.tdealer, did = sel.value;
-      Store.commit('딜러 배정', st => { if (did) F.assign(st, dOf(st, did), tid); else { const cur = F.dealerAt(st, tid); if (cur) F.release(st, cur, 'break'); else return false; } });
-    }));
+    const pz = $('#ddPause', root); if (pz) pz.addEventListener('click', () => dd('로테이션 일시정지/재개', F.togglePause));
+    $('#ddEvery', root).addEventListener('change', (e) => { const m = Math.max(5, +e.target.value || 20); Store.patch(st => F.setPushMinutes(st, m)); });
+    $$('[data-tdealer]', root).forEach(sel => sel.addEventListener('change', () => { if (sel.value) dd('딜러 지정', st => F.assign(st, +sel.dataset.tdealer, sel.value)); }));
+    $$('[data-relieve]', root).forEach(b => b.addEventListener('click', () => dd('딜러 교체', st => F.relieve(st, +b.dataset.relieve))));
     $('#dealerForm', root).addEventListener('submit', (e) => {
-      e.preventDefault(); const name = e.target.name.value.trim(); if (!name) { toast('이름을 입력하세요'); return; }
-      Store.commit('딜러 추가: ' + name, st => { F.addDealer(st, name); }); const i = $('#dealerForm input[name=name]'); if (i) i.focus();
+      e.preventDefault(); const v = e.target.name.value.trim(); if (!v) { toast('이름을 입력하세요'); return; }
+      dd('딜러 출근: ' + v, st => F.attend(st, v)); const i = $('#dealerForm input[name=name]'); if (i) i.focus();
     });
-    $$('[data-dstat]', root).forEach(b => b.addEventListener('click', () => Store.commit('딜러 상태 변경', st => F.release(st, dOf(st, b.dataset.dstat), b.dataset.s))));
-    $$('[data-ddel]', root).forEach(b => b.addEventListener('click', () => {
-      const d = dOf(S(), b.dataset.ddel); if (!confirm(`${d.name} 딜러를 명단에서 삭제할까요?`)) return;
-      Store.commit('딜러 삭제: ' + d.name, st => { st.dealers = st.dealers.filter(x => x.id !== d.id); });
-    }));
+    $$('[data-dhold]', root).forEach(b => b.addEventListener('click', () => dd('투입 보류', st => F.toggleHold(st, b.dataset.dhold))));
+    $$('[data-dhome]', root).forEach(b => b.addEventListener('click', () => dd('딜러 퇴근', st => F.sendHome(st, b.dataset.dhome))));
+    $$('[data-dback]', root).forEach(b => b.addEventListener('click', () => dd('딜러 복귀', st => F.checkBack(st, b.dataset.dback))));
   }
 
   /* ---------- 렌더 루프 ---------- */

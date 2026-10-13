@@ -7,7 +7,8 @@ GitHub: `thstjdals09-lang/tournament` · 배포: GitHub Pages(main 브랜치 루
 - `index.html` 셸: 첫 화면은 이벤트 목록(`#home`, 생성·수정·들어가기). 이벤트에 들어가면 상단바(이벤트 목록 버튼 + 이벤트 선택 + 되돌리기/다시실행 + 통계 칩)와 탭(등록/테이블/클락/딜러/현황/용지), `#view`, 하단 탭바, 액션시트, `#print-root`
 - `js/store.js` 상태/영속화. **모든 변경은 `Store.commit(label, fn)`** — 스냅샷을 쌓아 되돌리기 50단계. 사소한 변경(설정·템플릿·선택 이벤트)은 `Store.patch`(히스토리 없음)
 - `js/logic.js` 도메인 로직(순수 함수, state를 받아 변경). 좌석 배정·브레이크·이동·탈락·밸런싱·바우처
-- `js/floor.js` 클락(이벤트별 `levels`/`clock`/`lateRegLevel`)과 딜러(`state.dealers`, `state.dealerCfg`) 로직
+- `js/floor.js` 클락(이벤트별 `levels`/`clock`/`lateRegLevel`)과 딜러 연결(`state.dd` = dealer-director 엔진 state)
+- `js/dd-engine.js` dealer-director(DD) 로테이션 엔진을 **그대로 복사**한 것. 고칠 때는 DD 저장소에서 고치고 다시 복사
 - `js/print.js` 참가확인증/상금바우처 HTML 렌더 + `window.print` (용지 80mm/A5/A4, `@page` 동적 주입)
 - `js/app.js` 탭별 view(HTML 문자열) + bind(이벤트). 상태 변경 시 전체 리렌더
 
@@ -22,7 +23,7 @@ GitHub: `thstjdals09-lang/tournament` · 배포: GitHub Pages(main 브랜치 루
 - 사용 설정은 모두 **이벤트 단위**이며 **등록 탭**에서만 조작. `event.disabledSeats`(좌석 번호, 모든 테이블 공통), `event.disabledTables`(테이블 번호, 오픈 전에만 변경 가능 — 열린 테이블·타 이벤트 번호는 잠금). 테이블 탭은 조작 전용
 - 상금표는 퍼센트가 아니라 순위 구간 행 `payouts:[{from,to,amount,label}]` (예: 100~900위 30,000). `payoutFor(rank)`로 바우처 금액 자동
 - 클락: 이벤트마다 블라인드 구조와 클락을 따로 가진다. `clock = {idx, running, remain, anchor}`, 남은 시간 = remain − (now − anchor). 클락 조작(시작/정지/레벨 이동)은 `Store.patch`(되돌리기로 시간이 되감기지 않게), 구조 편집은 `commit`. 0.5초 tick 이 모든 이벤트의 끝난 레벨을 넘기고 화면의 `[data-clk]` 숫자만 갱신
-- 딜러: 현장 공통 명단, 테이블 id 로 배정. 푸시 = 가장 오래 쉰 딜러부터 [휴식 딜러들 + 테이블 순서대로 앉은 딜러] 줄을 번호순 오픈 테이블에 다시 채우고 남는 딜러는 휴식. 테이블 브레이크 시 그 테이블 딜러는 휴식. 테이블이 열리면(`openTable`/`reopenTable`, 등록 중 자동 오픈 포함) `Floor.autoAssign`이 가장 오래 쉰 딜러를 배치(딜러 탭에서 끌 수 있음). dealer-director 규칙으로 바꿀 때는 이 함수만 교체
+- 딜러: DD 엔진에 맡긴다(현장 공통 `state.dd`, DD 테이블 id = 't'+번호). `Store.commit`마다 `Floor.sync`가 TD의 열린 테이블 번호와 DD 열린 테이블을 맞춘다 → 테이블이 열리면 DD가 가장 오래 쉰 딜러를 자동 배치, 깨지면 그 딜러는 휴식. 교대·출퇴근·보류·지정·지금 교체는 DD 함수 그대로. 자동 교대는 0.5초 tick 에서 `Floor.pushDue`일 때 `executePush`(patch). 교대 규칙은 DD CLAUDE.md 를 따른다(앉은 딜러는 교대로 테이블을 옮기지 않음 등)
 - 컨바인: 닫을 테이블 여러 개 선택 → `planCombine`이 이동 계획(미리보기) → `applyCombine`. 오픈 밸런싱 = 새 테이블 오픈 + `autoBalance`. 빠른 탈락 = 테이블·좌석 번호로 찾아 탈락. 이동 결과는 1인 1장 좌석 이동 안내(`Print.moveHtml`, 참가확인증 용지) 인쇄 가능 (yajasu 참고)
 - KO: 탈락 시 아웃시킨 사람 선택(선택 사항) → `p.knockedBy`, 상대 `knockouts++`. 복구 시 되돌림
 
@@ -38,3 +39,4 @@ GitHub: `thstjdals09-lang/tournament` · 배포: GitHub Pages(main 브랜치 루
 - 2026-10-13 클락 탭(이벤트별 블라인드 구조·레이트 레지·전광판·레벨 종료 알림음), 딜러 탭(명단·테이블 배정·푸시 로테이션·근무 시간), 탈락 시 KO 기록, 상단 바 클락 칩
 - 2026-10-13 yajasu 참고: 컨바인(이동 계획 미리보기), 새 테이블 + 밸런싱, 빠른 탈락(테이블·좌석 번호), 좌석 이동 안내 인쇄
 - 2026-10-13 첫 화면을 이벤트 목록으로(들어가면 이벤트별 탭), 이벤트 탭은 '현황'으로, 테이블 오픈 시 딜러 자동 배치
+- 2026-10-13 딜러 탭을 dealer-director 엔진으로 교체(테이블 오픈 시 자동 배치, 로테이션 시작/교대/일시정지, 출근·퇴근·보류·지정), 테이블 카드에 딜러 표시

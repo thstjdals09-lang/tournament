@@ -55,6 +55,7 @@ const Store = (() => {
     const snap = clone(state);
     const result = fn(state);
     if (result === false) return false;         // 취소
+    if (typeof Floor !== 'undefined') Floor.sync(state); // 열리고 닫힌 테이블을 딜러 엔진(DD)에 반영 → 딜러 자동 배치
     past.push({ label, snap });
     if (past.length > MAX_HISTORY) past.shift();
     future = [];
