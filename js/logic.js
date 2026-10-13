@@ -241,6 +241,34 @@ const Logic = (() => {
     return moves;
   }
 
+
+  /* ---------- 컨바인: 여러 테이블을 한 번에 닫고 남는 테이블에 균등 분배 ---------- */
+  /** 이동 계획만 만든다(상태 변경 없음). 매번 인원이 가장 적은 남는 테이블의 빈 좌석 중 무작위 */
+  function planCombine(s, eventId, tableIds) {
+    const closing = new Set(tableIds);
+    const keep = shuffle(openTables(s, eventId).filter(t => !closing.has(t.id) && tableUsable(t)));
+    if (!tableIds.length) return { moves: [] };
+    if (!keep.length) return { error: '최소 1개 테이블은 남겨야 합니다' };
+    const free = {}, cnt = {};
+    keep.forEach(t => { free[t.id] = emptySeats(s, t); cnt[t.id] = tablePlayers(s, t.id).length; });
+    const movers = shuffle([].concat.apply([], tableIds.map(id => tablePlayers(s, id))));
+    const capacity = keep.reduce((n, t) => n + free[t.id].length, 0);
+    if (movers.length > capacity) return { error: '빈 좌석 부족 (이동 ' + movers.length + '명 / 빈좌석 ' + capacity + ')' };
+    const moves = [];
+    for (const p of movers) {
+      const t = keep.filter(x => free[x.id].length).sort((a, b) => cnt[a.id] - cnt[b.id])[0];
+      const seat = free[t.id].splice(rand(free[t.id].length), 1)[0];
+      cnt[t.id]++;
+      moves.push({ player: p, from: { tableId: p.tableId, seat: p.seat }, to: { tableId: t.id, seat } });
+    }
+    return { moves };
+  }
+  function applyCombine(s, tableIds, moves) {
+    moves.forEach(m => { const p = playerOf(s, m.player.id); p.tableId = m.to.tableId; p.seat = m.to.seat; });
+    tableIds.forEach(id => { const t = tableOf(s, id); if (t) { t.status = 'closed'; t.closedAt = Date.now(); } });
+    return moves.map(m => Object.assign({}, m, { player: playerOf(s, m.player.id) }));
+  }
+
   /* ---------- 상금 구조: 순위 구간 → 금액 행 [{from,to,amount,label}] ---------- */
   function prizePool(s, ev) {
     if (ev.prizePool) return +ev.prizePool;
@@ -265,6 +293,6 @@ const Logic = (() => {
     s.vouchers.push(v); return v;
   }
 
-  return { rand, pick, shuffle, eventOf, tableOf, playerOf, openTables, allTables, eventPlayers, activePlayers, bustedPlayers, tablePlayers, seatPlayer, emptySeats, usableSeats,
+  return { planCombine, applyCombine, rand, pick, shuffle, eventOf, tableOf, playerOf, openTables, allTables, eventPlayers, activePlayers, bustedPlayers, tablePlayers, seatPlayer, emptySeats, usableSeats,
     createEvent, updateEvent, deleteEvent, openTable, toggleSeat, closeTable, reopenTable, deleteTable, pickSeat, register, cancelRegistration, movePlayer, bustOut, unbust, balanceInfo, autoBalance, issueVoucher, prizePool, normalizePayouts, payoutTable, payoutRow, payoutFor, payoutTotal, toggleTable, tableUsable, nextTableNumber, usedTableNumbers, toggleEventSeat, toggleEventTable, disabledSeatSet, playersOnDisabledSeats };
 })();

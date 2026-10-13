@@ -309,6 +309,9 @@ const App = (() => {
       <div class="row tight">
         <button class="primary sm" id="btnOpenTable">새 테이블</button>
         <button class="sm" id="btnAutoBalance2" ${info.need ? '' : 'disabled'}>자동 밸런싱</button>
+        <button class="sm" id="btnOpenBalance">새 테이블 + 밸런싱</button>
+        <button class="sm" id="btnCombine" ${allOpen.length > 1 ? '' : 'disabled'}>컨바인</button>
+        <button class="sm danger" id="btnQuickBust" ${allOpen.length ? '' : 'disabled'}>빠른 탈락</button>
         <input id="tblSearch" placeholder="플레이어 이름 / 엔트리번호 / 테이블번호" value="${h(ui.tblSearch)}" style="flex:1;min-width:180px">
       </div>
       <div class="row tight" style="margin-top:8px">
@@ -330,6 +333,9 @@ const App = (() => {
     if (!curEvent()) { bindNoEvent(root); return; }
     const ev = curEvent();
     $('#btnOpenTable', root).addEventListener('click', () => askOpenTable(ev.id));
+    $('#btnOpenBalance', root).addEventListener('click', () => doOpenBalance(ev.id));
+    $('#btnCombine', root).addEventListener('click', () => combineSheet(ev.id));
+    $('#btnQuickBust', root).addEventListener('click', () => quickBustSheet(ev.id));
     $('#btnTools', root).addEventListener('click', () => { ui.tblToolsOpen = !ui.tblToolsOpen; render(); });
     $$('[data-sort]', root).forEach(b => b.addEventListener('click', () => { ui.tblSort = b.dataset.sort; render(); }));
     $$('[data-filter]', root).forEach(b => b.addEventListener('click', () => { ui.tblFilter = b.dataset.filter; render(); }));
@@ -422,7 +428,60 @@ const App = (() => {
   function showMoves(title, moves) {
     const s = S();
     const body = `<div class="list" style="margin-bottom:12px">${moves.map(m => `<div class="list-item"><div class="grow"><div class="t">${h(m.player.name)} <span class="muted small">#${m.player.entryNo}</span></div><div class="s">${tableName(s, m.from.tableId)} S${m.from.seat} → <b>${tableName(s, m.to.tableId)} S${m.to.seat}</b></div></div></div>`).join('')}</div>`;
-    sheet(title + ` (${moves.length}명 이동)`, [{ label: '되돌리기', cls: 'ghost', fn: () => { Store.undo(); toast('되돌렸습니다'); } }], body);
+    sheet(title + ` (${moves.length}명 이동)`, [
+      { label: '이동 안내 인쇄 (1인 1장)', cls: 'primary', fn: () => printMoves(moves) },
+      { label: '되돌리기', cls: 'ghost', fn: () => { Store.undo(); toast('되돌렸습니다'); } }], body);
+  }
+  function printMoves(moves) {
+    const s = S(); const tpl = s.templates.confirm; const num = (id) => { const t = L.tableOf(s, id); return t ? t.number : '-'; };
+    Print.print(Print.moveHtml(tpl, { event: curEvent(), moves: moves.map(m => Object.assign({}, m, { fromNumber: num(m.from.tableId), toNumber: num(m.to.tableId) })) }), tpl.paper);
+  }
+  /** 오픈 밸런싱: 새 테이블을 열고 자동 밸런싱으로 전체 편차를 1 이하로 */
+  function doOpenBalance(eventId) {
+    const s = S(); const ev = L.eventOf(s, eventId); const next = L.nextTableNumber(s, ev);
+    const ans = prompt(`새로 열 테이블 번호 (비우면 자동 ${next ? 'T' + next : '없음'})`, ''); if (ans === null) return;
+    let r, moves = [];
+    Store.commit('새 테이블 + 밸런싱', st => {
+      r = L.openTable(st, eventId, { number: +ans || 0 }); if (r.error) return false;
+      moves = L.autoBalance(st, eventId);
+    });
+    if (r.error) { toast(r.error); return; }
+    if (moves.length) showMoves(`T${r.number} 오픈 밸런싱`, moves); else toast(`T${r.number} 오픈 · 이동할 필요가 없습니다`);
+  }
+  /** 컨바인: 닫을 테이블을 여러 개 고르면 이동 계획을 미리 보여주고 실행 */
+  function combineSheet(eventId) {
+    const s = S(); const ts = L.openTables(s, eventId); let sel = [], plan = null;
+    const body = `<p class="muted small" style="margin:0 0 8px">닫을 테이블을 고르세요. 앉아 있던 플레이어는 남는 테이블에 인원이 적은 순으로 무작위 배정됩니다.</p>
+      <div class="tbl-toggle-grid" style="margin-bottom:10px">${ts.map(t => `<label class="tbl-toggle"><input type="checkbox" data-cmb="${t.id}"><b>T${t.number}</b><span class="muted small">${L.tablePlayers(s, t.id).length}명</span></label>`).join('')}</div>
+      <div id="cmbPlan" class="muted small" style="margin-bottom:12px">선택한 테이블이 없습니다.</div>`;
+    sheet('컨바인 (테이블 합치기)', [{ label: '컨바인 실행', cls: 'primary', fn: () => {
+      if (!plan || plan.error || !sel.length) { toast(plan && plan.error ? plan.error : '닫을 테이블을 고르세요'); return 'keep'; }
+      let done; const nums = sel.map(id => 'T' + L.tableOf(S(), id).number).join(', ');
+      Store.commit('컨바인: ' + nums, st => { done = L.applyCombine(st, sel, plan.moves); Floor.releaseClosed(st); });
+      setTimeout(() => done.length ? showMoves(`${nums} 컨바인`, done) : toast(nums + ' 닫음'), 0);
+    } }], body, (el) => {
+      $$('[data-cmb]', el).forEach(cb => cb.addEventListener('change', () => {
+        sel = $$('[data-cmb]', el).filter(x => x.checked).map(x => x.dataset.cmb);
+        plan = L.planCombine(S(), eventId, sel);
+        const box = $('#cmbPlan', el);
+        if (!sel.length) box.innerHTML = '선택한 테이블이 없습니다.';
+        else if (plan.error) box.innerHTML = `<span class="warn-text">${h(plan.error)}</span>`;
+        else box.innerHTML = `<div class="list">${plan.moves.map(m => `<div class="list-item"><div class="grow"><div class="t">${h(m.player.name)}</div><div class="s">${tableName(S(), m.from.tableId)} S${m.from.seat} → <b>${tableName(S(), m.to.tableId)} S${m.to.seat}</b></div></div></div>`).join('') || '이동할 플레이어가 없습니다.'}</div>`;
+      }));
+    });
+  }
+  /** 빠른 탈락: 테이블·좌석 번호로 찾아서 탈락 처리 */
+  function quickBustSheet(eventId) {
+    const s = S(); const ts = L.openTables(s, eventId);
+    const body = `<div class="row"><label class="field"><span>테이블</span><select id="qbT">${ts.map(t => `<option value="${t.id}">T${t.number}</option>`).join('')}</select></label>
+      <label class="field"><span>좌석</span><select id="qbS"></select></label></div><div id="qbWho" class="assign-box"></div>`;
+    let pid = null;
+    sheet('빠른 탈락', [{ label: '이 플레이어 탈락 처리', cls: 'danger', fn: () => { if (!pid) { toast('그 좌석에 플레이어가 없습니다'); return 'keep'; } const id = pid; setTimeout(() => bustSheet(id), 0); } }], body, (el) => {
+      const tSel = $('#qbT', el), sSel = $('#qbS', el), who = $('#qbWho', el);
+      const show = () => { const p = L.seatPlayer(S(), tSel.value, +sSel.value); pid = p ? p.id : null; who.innerHTML = p ? `<span class="big">${h(p.name)}</span><span class="muted small">#${p.entryNo}</span>` : '<span class="muted">빈 좌석</span>'; };
+      const fill = () => { const t = L.tableOf(S(), tSel.value); sSel.innerHTML = L.tablePlayers(S(), t.id).sort((a, b) => a.seat - b.seat).map(p => `<option value="${p.seat}">S${p.seat} ${h(p.name)}</option>`).join(''); show(); };
+      tSel.addEventListener('change', fill); sSel.addEventListener('change', show); fill();
+    });
   }
 
   /* ---------- 이벤트 탭 ---------- */
