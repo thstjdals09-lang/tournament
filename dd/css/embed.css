@@ -1,0 +1,50 @@
+/* Holdem TD(토너먼트 관리 프로그램)에 들어갈 때만 쓰는 스타일. 단독 실행(dealer-director.web.app)에는 아무 영향이 없다.
+   - html.td        : Holdem TD 팔레트(차콜 배경 + 스틸블루 강조 + 골드 경고)로 덮어쓴다. TD 가 복사해 쓰는 dd/index.html 의 <html> 에 붙인다
+                      (딜러 휴대폰·TV 화면도 같은 파일이라 같은 팔레트)
+   - html.embedded  : iframe 으로 열렸을 때(app.js 가 붙인다). TD 가 대신 보여 주는 것(제목·이벤트 선택·로그아웃·이벤트 목록 링크)을 숨긴다 */
+
+html.td {
+  --bg: #111417;
+  --panel: #191d22;
+  --panel-2: #22272e;
+  --line: #2e343d;
+  --text: #e6e9ee;
+  --muted: #8a919c;
+  --accent: #5d80a8;   /* 스틸블루 (원본 초록) */
+  --in: #8fa9c9;       /* 들어감·정보 (원본 파랑) */
+  --warn: #c9a96a;     /* 골드 */
+  --danger: #c4626b;
+  --radius: 8px;
+}
+html.td body { font-family: "Segoe UI", "Noto Sans KR", "Apple SD Gothic Neo", Roboto, sans-serif; letter-spacing: -.005em; }
+html.td button { border-radius: 8px; }
+html.td button:hover:not(:disabled) { background: #2a3039; border-color: var(--line); }
+html.td button.primary, html.td a.btn.primary { color: #fff; font-weight: 600; }
+html.td button.primary:hover:not(:disabled) { background: #6a8db5; }
+html.td button.danger { background: #5a2f34; border-color: #6d383e; color: #f3c9cd; }
+html.td button.warn { background: #5d4b2a; border-color: #6f5a33; color: #f1dfb6; }
+html.td input, html.td select, html.td textarea { background: var(--panel-2); }
+html.td input:focus, html.td select:focus, html.td textarea:focus { border-color: var(--in); outline: none; }
+html.td .seg button.on { color: #fff; }
+html.td .tabs a.on { box-shadow: inset 0 -2px 0 var(--in); }
+html.td .event-bar b { color: var(--in); }
+html.td .sheet thead th.now { background: #26303c; color: var(--in); }
+html.td .sheet td.rest[draggable].picked, html.td .sheet td.picked { background: #26405c; color: var(--in); }
+html.td .sheet td.drag-over { color: #fff; }
+html.td .statline .ok b { color: #7fa58b; }
+html.td .conn.ok { color: #7fa58b; }
+html.td .me-next.soon, html.td .notice-bar, html.td .alert.warn { background: #2a2617; }
+html.td .me-eo.ask { background: #1f2a38; }
+html.td .share-qr img, html.td .share-qr canvas { border-radius: 6px; }
+html.td .toast { background: #2a3039; border: 1px solid var(--line); color: var(--text); }
+html.td dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; }
+html.td dialog::backdrop { background: rgba(0, 0, 0, .55); }
+html.td h2 { letter-spacing: .02em; }
+
+/* iframe 으로 열렸을 때: TD 상단바가 이벤트 이름·로그아웃·계정 관리를 맡는다 */
+html.embedded .topbar .logo { display: none; }
+html.embedded #btnEvents { display: none; }
+html.embedded .account-bar a.btn,
+html.embedded .account-bar [data-act="logout"] { display: none; }
+html.embedded body.is-admin .admin { padding-top: 0; }
+html.embedded body.is-list .topbar { display: none; } /* 목록·관리자 화면의 위쪽 줄(교대 간격 칸 등)은 iframe 안에서 쓸 데가 없다 */
