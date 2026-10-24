@@ -946,6 +946,29 @@ dialog .times-row label { display: inline-flex; gap: 6px; }
 .place.duty { background: var(--duty); color: #120a1f; }
 .rowhead .plan-at { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
 .statline .duty b { color: var(--duty); }
+/* 교대 때 테이블 바꾸기 (예약) */
+.sheet th.colpick { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.sheet th.colpick:hover { color: var(--accent); }
+.sheet td.tsel { cursor: pointer; }
+.sheet td.tsel:hover { outline: 1px dashed var(--accent); outline-offset: -2px; }
+.sheet td.idlec { color: var(--muted); font-size: 12px; }
+.sheet td.closedc { color: var(--muted); font-size: 12px; text-decoration: line-through; }
+.sheet .rowhead em.sched { color: var(--accent); font-style: normal; display: block; font-size: 11px; }
+.tcard .tsched { font-size: 12px; color: var(--accent); margin-top: 2px; }
+.sched-when { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.sched-list { display: grid; gap: 0; max-height: 50vh; overflow: auto; }
+.sched-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.sched-row .acts { display: flex; gap: 6px; margin-left: auto; }
+/* 명령 입력칸 */
+.quick .cmd-form { flex: 1 1 100%; }
+.cmd-said { margin: 0 0 8px; }
+.cmd-list { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 4px; }
+.cmd-list li { padding: 6px 10px; border-radius: 8px; border-left: 3px solid var(--line); background: var(--panel); }
+.cmd-list li.ok { border-left-color: var(--accent); }
+.cmd-list li.note { border-left-color: var(--muted); color: var(--muted); }
+.cmd-list li.bad { border-left-color: var(--danger, #e5484d); }
+.hint code { display: inline-block; margin: 2px 2px; padding: 1px 6px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); }
+.push-every .interval-plan { margin-left: 4px; color: var(--accent); }
 @media (min-width: 1500px) {
   .tables-wrap { grid-template-columns: minmax(0, 1fr) 170px; }
 }

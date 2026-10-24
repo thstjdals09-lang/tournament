@@ -55,6 +55,7 @@
       <span>교대 간격</span>
       <input type="number" id="pushEvery" min="5" max="120" step="1" inputmode="numeric" aria-label="교대 간격(분)">
       <span>분</span>
+      <button type="button" class="mini interval-plan" id="intervalPlan" data-act="interval-cancel" hidden></button>
     </label>
     <div class="controls" id="controls">
       <button id="btnClock" class="primary">로테이션 시작</button>
@@ -92,6 +93,11 @@
       <form id="formQuickNotice" class="inline-form grow">
         <label>공지 <input name="text" placeholder="딜러 휴대폰에 보임" autocomplete="off" required></label>
         <button>등록</button>
+      </form>
+      <form id="formCmd" class="inline-form grow cmd-form" title="말로 시키기 — 알아들은 내용을 먼저 보여 주고, [실행]을 눌러야 바뀝니다">
+        <label>명령 <input name="cmd" placeholder="예: 3시부터 15분 간격 · 1시에 7번 열어 · 2번 1시 깨기 · 김민수 6시 출근" autocomplete="off" required></label>
+        <button>확인</button>
+        <button type="button" class="mini" data-act="cmd-help">예시</button>
       </form>
     </section>
     <div class="notice-bar" id="noticeBar"></div>
@@ -140,7 +146,8 @@
             칸을 <b>끌어다 놓거나, 눌러서 고른 뒤 놓을 칸을 누르면</b> 그 교대를 직접 정할 수 있습니다 —
             예정 칸에서는 같은 시각의 <b>휴식 ↔ 테이블</b>끼리 놓아 <b>휴식을 넘기고</b>, <b>테이블 ↔ 테이블</b>끼리 놓아 그 교대에 <b>두 사람의 테이블을 맞바꾸고</b>,
             같은 딜러의 다른 시각에 휴식을 놓아 <b>휴식을 옮깁니다</b> (뒤의 예정이 다시 계산됨). <b>진행 중</b> 칸에서는 아무 칸에나 놓아 <b>지금 당장</b> 자리를 바꿉니다.<br>
-            자동 교대는 앉아 있는 딜러를 다른 테이블로 옮기지 않습니다 — 옮겨지는 건 이렇게 직접 정한 경우뿐입니다.</p>
+            자동 교대는 앉아 있는 딜러를 다른 테이블로 옮기지 않습니다 — 옮겨지는 건 이렇게 직접 정한 경우뿐입니다.<br>
+            <b>예정 시각 머리</b>(또는 테이블별 표의 칸)를 누르면 그 교대에 테이블을 <b>사용 시작·대기·깨기</b>로 예약합니다 — 1시에 열 테이블은 1시 교대에.</p>
         </section>
       </div>
 
@@ -430,6 +437,7 @@
   <script src="js/account.js"></script>
   <script src="js/sync.js"></script>
   <script src="js/backup.js"></script>
+  <script src="js/command.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

@@ -862,9 +862,12 @@
     }).join('');
   }
 
-  function tableRows(cols) {
-    const tables = E.usedTables(state); // 대기 테이블은 표에 넣지 않음 (딜러가 없으므로)
-    if (!tables.length) return `<tr><td class="empty-row" colspan="${cols.length + 1}">사용 중인 테이블이 없습니다</td></tr>`;
+  // 테이블별 표. 대기 테이블도 넣는다 — 예정 칸을 누르면 그 교대에 사용 시작·대기·깨기 (edit = 디렉터 화면)
+  function tableRows(cols, edit) {
+    const tables = E.activeTables(state);
+    if (!tables.length) return `<tr><td class="empty-row" colspan="${cols.length + 1}">열린 테이블이 없습니다</td></tr>`;
+    let k = 0;
+    const ns = cols.map(c => (c.cls === 'future' ? ++k : c.cls === 'now' ? 0 : null)); // 앞으로 몇 번째 교대 뒤 (지금 = 0)
     const byTable = cols.map(c => {
       const m = {};
       for (const id in c.a) if (c.a[id] > 0) m[c.a[id]] = id;
@@ -873,21 +876,37 @@
     return tables.map(t => {
       let prev;
       const cells = cols.map((c, i) => {
+        const n = ns[i];
+        const pick = edit && n > 0 ? ` data-t="${t.id}" data-tn="${n}" title="눌러서 이 교대에 사용 시작·대기·깨기"` : '';
+        const sel = pick ? ' tsel' : '';
+        if (n != null && E.tableClosedAt(t, n)) return `<td class="${c.cls} closedc${sel}"${pick}>깨짐</td>`;
+        if (n != null && !E.tableUsedAt(t, n)) return `<td class="${c.cls} idlec${sel}"${pick}>대기</td>`;
         const id = byTable[i][t.no];
         const chg = prev !== undefined && id !== undefined && id !== prev ? ' chg' : '';
         prev = id;
-        if (!id) return c.cls === 'past' ? `<td class="${c.cls} na"></td>` : `<td class="${c.cls} vac">공석</td>`;
-        return `<td class="${c.cls} who${chg}">${esc(nameOf(id))}</td>`;
+        if (!id) return c.cls === 'past' ? `<td class="${c.cls} na"></td>` : `<td class="${c.cls} vac${sel}"${pick}>공석</td>`;
+        return `<td class="${c.cls} who${chg}${sel}"${pick}>${esc(nameOf(id))}</td>`;
       }).join('');
-      return `<tr><th class="rowhead">${tchip(t.no)}${t.feature ? '<em>피처</em>' : ''}${t.locked ? '<em>고정</em>' : ''}</th>${cells}</tr>`;
+      const sched = t.sched ? `<em class="sched">${esc(schedText(t))}</em>` : '';
+      return `<tr><th class="rowhead">${tchip(t.no)}${t.feature ? '<em>피처</em>' : ''}${t.locked ? '<em>고정</em>' : ''}${t.use === false ? '<em>대기</em>' : ''}${sched}</th>${cells}</tr>`;
     }).join('');
   }
 
+  // 앞으로 n번째 교대의 시각 (표의 예정 열과 같은 계산)
+  const pushAtN = n => (projection()[n - 1] || {}).at || null;
+  const SCHED_LABEL = { use: '사용 시작', idle: '대기로', close: '깨기' };
+  const schedText = t => (t && t.sched ? `${pushAtN(t.sched.n) ? hhmm(pushAtN(t.sched.n)) : `${t.sched.n}번째`} 교대에 ${SCHED_LABEL[t.sched.act]}` : '');
+
   function sheetHTML(view, meId, given, edit) {
     const cols = given ? given.cols : sheetColumns();
-    const head = `<tr><th class="corner">${view === 'table' ? '테이블' : '딜러'}</th>${cols.map(c =>
-      `<th class="${c.cls}">${c.at ? hhmm(c.at) : '—'}${c.sub ? `<small>${c.sub}</small>` : ''}</th>`).join('')}</tr>`;
-    const body = view === 'table' ? tableRows(cols) : dealerRows(cols, meId, given && given.dealers, edit);
+    let k = 0;
+    // 디렉터 화면에서는 예정 시각 머리를 누르면 그 교대에 테이블 사용 시작·대기·깨기 (교대 때 바꾸기)
+    const head = `<tr><th class="corner">${view === 'table' ? '테이블' : '딜러'}</th>${cols.map(c => {
+      const n = c.cls === 'future' ? ++k : 0;
+      const pick = edit && n ? ` data-coln="${n}" title="눌러서 이 교대에 테이블 사용 시작·대기·깨기"` : '';
+      return `<th class="${c.cls}${pick ? ' colpick' : ''}"${pick}>${c.at ? hhmm(c.at) : '—'}${c.sub ? `<small>${c.sub}</small>` : ''}</th>`;
+    }).join('')}</tr>`;
+    const body = view === 'table' ? tableRows(cols, edit) : dealerRows(cols, meId, given && given.dealers, edit);
     return `<div class="sheet-wrap"><table class="sheet ${view}"><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
   }
 
@@ -947,6 +966,13 @@
     rb.title = step ? `되돌리기: ${hhmm(step.at)} ${step.label} (Ctrl+Z)` : '되돌릴 작업 없음 — 교대가 실행되면 그 전 작업은 되돌릴 수 없습니다';
     const every = $('pushEvery');
     if (document.activeElement !== every) every.value = state.settings.pushMinutes;
+    const ip = state.clock.intervalPlan;
+    const ipb = $('intervalPlan');
+    ipb.hidden = !ip;
+    if (ip) {
+      ipb.textContent = `${hhmm(ip.at)}부터 ${ip.minutes}분`;
+      ipb.title = `교대 간격 예약 — ${hhmm(ip.at)}에 교대하고 그 뒤 ${ip.minutes}분마다. 누르면 예약 취소`;
+    }
     document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('on', b.dataset.view === sheetView));
     const cp = $('btnClearPlans');
     const np = E.planCount(state);
@@ -1051,7 +1077,7 @@
     // 제한이 없으면 막대는 '지금 가장 오래 일한 사람' 기준 (꽉 찬 막대 = 다음 휴식 후보)
     const scale = limited ? maxMs : Math.max(E.MIN, ...E.working(state).map(workedOf));
     const html = E.activeTables(state).map(t => {
-      if (t.use === false) return idleCard(t);
+      if (t.use === false) return idleCard(t, incoming.get(t.id));
       const d = t.dealerId ? E.dealerOf(state, t.dealerId) : null;
       const w = workedOf(d);
       const pct = Math.min(100, Math.round((w / scale) * 100));
@@ -1066,6 +1092,7 @@
         <div class="tmeta">${d ? `${minutes(w)}분 근무${limited ? ` / ${state.settings.maxWorkMinutes}분` : ''}` : ''}</div>
         <div class="bar"><i style="width:${pct}%"></i></div>
         ${nextIn ? `<div class="tnext">다음 → <b>${esc(nameOf(nextIn))}</b></div>` : ''}
+        ${t.sched ? `<div class="tsched">예약 · ${esc(schedText(t))}</div>` : ''}
       </div>`;
     }).join('');
     setHTML($('tables'), html || '<p class="empty">오픈된 테이블이 없습니다. 위에서 테이블 번호를 입력하세요.</p>');
@@ -1076,13 +1103,15 @@
     ? '체크하면 다음 순서 딜러가 바로 들어갑니다' : '끄면 딜러는 휴식으로 가고 테이블은 열린 채 대기합니다'}"><input type="checkbox" data-use="${t.id}"${t.use === false ? '' : ' checked'}> 사용</label>`;
 
   // 대기 테이블: 열려 있지만 딜러를 넣지 않음
-  function idleCard(t) {
+  function idleCard(t, nextIn) {
     const tags = [t.feature && '<em>피처</em>', t.locked && '<em class="lock">고정</em>'].filter(Boolean).join('');
-    return `<div class="tcard idle${t.feature ? ' feature' : ''}" data-table="${t.id}" role="button" tabindex="0" title="눌러서 사용·딜러 지정·깨기">
+    return `<div class="tcard idle${t.feature ? ' feature' : ''}" data-table="${t.id}" role="button" tabindex="0" title="눌러서 사용·교대 때 사용 시작·딜러 지정·깨기">
         <div class="tno">${tchip(t.no)}${tags}${useBox(t)}<button class="mini danger" data-act="close" data-id="${t.id}" title="${t.no}번 테이블 깨기">깨기</button></div>
         <div class="tdealer">대기 · 딜러 없음</div>
-        <div class="tmeta">사용을 체크하면 투입</div>
+        <div class="tmeta">${t.sched ? '' : '사용을 체크하면 바로 투입 · 눌러서 교대 때 사용 시작'}</div>
         <div class="bar"><i style="width:0%"></i></div>
+        ${t.sched ? `<div class="tsched">예약 · ${esc(schedText(t))}</div>` : ''}
+        ${nextIn ? `<div class="tnext">다음 → <b>${esc(nameOf(nextIn))}</b></div>` : ''}
       </div>`;
   }
 
@@ -2062,6 +2091,55 @@
       case 'dealer-open':
         openDealerMenu(id);
         break;
+      case 'sched-open':
+        openSched(Number(b.dataset.n) || 1, t ? t.id : null);
+        break;
+      case 'cmd-help':
+        openCmd('');
+        break;
+      case 'cmd-run': {
+        // 지금 state로 다시 알아듣고 차례로 실행. 교대 간격(설정)은 위쪽 칸처럼 되돌리기 기록 없이, 나머지는 한 번에 되돌릴 수 있게
+        const now = Date.now();
+        const res = CMD.parse(cmdText, state, now);
+        const before = state;
+        let x = state;
+        for (const st of res.steps) if (st.kind === 'setting') x = st.run(x, now);
+        if (x !== state) commit(x);
+        let y = state;
+        for (const st of res.steps) if (st.kind !== 'setting') y = st.run(y, now);
+        if (y !== state) commit(y, `명령: ${cmdText.slice(0, 40)}`);
+        if (state === before) {
+          toast('바뀐 것이 없습니다 — 그 사이 상황이 달라졌을 수 있습니다');
+          break;
+        }
+        $('formCmd').elements.cmd.value = '';
+        toast(`실행 · ${res.steps.map(st => st.desc).join(' · ')}`, true);
+        break;
+      }
+      case 'interval-cancel': {
+        const ip = state.clock.intervalPlan;
+        if (ip && confirm(`${hhmm(ip.at)}부터 교대 간격 ${ip.minutes}분 — 예약을 취소할까요?`)) {
+          commit(E.cancelIntervalPlan(state, Date.now()), '간격 예약 취소');
+        }
+        break;
+      }
+      case 'tsched': {
+        if (!t) break;
+        const n = Number(($('schedN') || {}).value) || 1;
+        const act = b.dataset.sched;
+        const next = E.scheduleTable(state, t.id, n, act, Date.now());
+        if (next === state) {
+          toast('이 테이블에는 그 예약을 할 수 없습니다');
+          break;
+        }
+        commit(next, `${t.no}번 ${SCHED_LABEL[act]} 예약`);
+        const at = pushAtN(n);
+        toast(`${t.no}번 테이블 — ${at ? hhmm(at) : `${n}번째`} 교대에 ${SCHED_LABEL[act]}${act === 'use' ? ' (그때 오래 쉰 딜러가 들어갑니다)' : ' (앉아 있던 딜러는 그때 휴식)'}`, true);
+        break;
+      }
+      case 'tsched-cancel':
+        if (t) commit(E.unscheduleTable(state, t.id, Date.now()), `${t.no}번 예약 취소`);
+        break;
       case 'roster-open':
         openRosterMenu(b.dataset.name);
         break;
@@ -2455,7 +2533,8 @@
     if (t.use === false) {
       $('tableTitle').innerHTML = `${tchip(t.no)} 대기 <span class="muted">열려 있지만 딜러 없음</span>`;
       $('tableBody').innerHTML = `<div class="menu">
-        ${item('use', '사용', '다음 순서 딜러를 바로 넣기', 'primary')}
+        ${item('use', '지금 사용', '다음 순서 딜러를 바로 넣기', 'primary')}
+        ${item('sched-open', '교대 때 사용 시작', '고른 교대에 — 그 교대 계획 안에서 오래 쉰 딜러가 들어감 (로테가 꼬이지 않게)')}
         ${item('assign-open', '딜러 지정', '넣을 딜러를 직접 고르기 (사용으로 바뀜)')}
         ${item('lock', t.locked ? '고정 해제' : '고정', t.locked ? '다시 자동 교대에 넣기' : '자동 교대에서 빼기 (파이널 테이블 등)')}
         ${item('close', '깨기', '테이블을 닫기', 'danger')}
@@ -2481,9 +2560,62 @@
         ${item('lock', t.locked ? '고정 해제' : '고정', t.locked ? '다시 자동 교대에 넣기' : '자동 교대에서 빼기 (파이널 테이블 등)')}
         <button type="button" data-act="duty-open" data-id="${d.id}"><b>다른 업무</b><small>${esc(d.name)}은(는) 테이블에서 빠져 다른 업무 — 로테에 들어간 것처럼 근무로 계산</small></button>
         ${E.canDelay(state, d.id, Date.now()) ? `<button type="button" class="warn" data-act="dealer-open" data-id="${d.id}"><b>출근 시간 변경</b><small>${esc(d.name)}이(가) 늦게 옴 — 바꾼 시각에 출근, 로테이션도 그에 맞춰</small></button>` : ''}
+        ${item('sched-open', '교대 때 대기·깨기', `고른 교대에 — ${esc(d.name)}은(는) 그때 휴식`)}
         ${item('unuse', '사용 안 함', `${esc(d.name)}은(는) 휴식, 테이블은 열린 채 대기 (다시 체크하면 투입)`)}
         ${item('close', '깨기', `테이블을 닫고 ${esc(d.name)}은(는) 휴식`, 'danger')}
       </div>`;
+    $('dlgTable').showModal();
+  }
+
+  // ---------- 명령 입력칸 ----------
+  // 정해진 말투를 알아듣고(js/command.js) 먼저 '이렇게 할까요?'로 보여 준 뒤 [실행]을 눌러야 바뀐다 (되돌리기 한 번에 그 전으로)
+  const CMD = window.DealerCommand;
+  let cmdText = '';
+  function openCmd(text) {
+    const r = CMD.parse(text, state, Date.now());
+    cmdText = text;
+    const li = (cls, x) => `<li class="${cls}">${esc(x)}</li>`;
+    const examples = `<p class="hint">이렇게 말하면 됩니다 (여러 개는 쉼표로): ${r.examples.map(x => `<code>${esc(x)}</code>`).join(' ')}</p>`;
+    $('tableTitle').textContent = !text ? '명령 예시' : r.steps.length ? '이렇게 할까요?' : '알아듣지 못했습니다';
+    $('tableBody').innerHTML = `${text ? `<p class="muted cmd-said">“${esc(text)}”</p>` : ''}
+      ${r.steps.length ? `<ul class="cmd-list ok">${r.steps.map(x => li('ok', x.desc)).join('')}</ul>` : ''}
+      ${r.notes.length ? `<ul class="cmd-list note">${r.notes.map(x => li('note', x)).join('')}</ul>` : ''}
+      ${r.problems.length ? `<ul class="cmd-list bad">${r.problems.map(x => li('bad', x)).join('')}</ul>` : ''}
+      ${!text || r.problems.length || !r.steps.length ? examples : ''}
+      ${r.steps.length ? '<div class="dialog-actions"><button type="button" class="primary" data-act="cmd-run">실행</button></div>' : ''}`;
+    $('dlgTable').showModal();
+  }
+  $('formCmd').addEventListener('submit', e => {
+    e.preventDefault();
+    const text = e.target.elements.cmd.value.trim();
+    if (text) openCmd(text);
+  });
+
+  // ---------- 교대 때 테이블 바꾸기 (예약) ----------
+  // 표의 예정 시각 머리·테이블별 표의 예정 칸·테이블 칸 메뉴에서. 1시에 열 테이블을 지금 [사용]하면 그 순간 쉬던 딜러가 들어가
+  // 로테가 꼬인다 → 1시 교대에 같이 바꾼다 (2026-10-24 사용자 요청). tableId가 있으면 그 테이블만
+  function openSched(n, tableId) {
+    if (!state.clock.running) {
+      toast('로테이션을 시작하면 교대 때 테이블을 바꿀 수 있습니다 — 지금은 [사용] 체크로 바로');
+      return;
+    }
+    const slots = projection();
+    if (!slots.length) return;
+    n = Math.min(Math.max(1, n || 1), slots.length);
+    const tables = (tableId ? [E.tableOf(state, tableId)] : E.activeTables(state)).filter(t => t && t.status === 'open');
+    const opts = slots.map((p, i) => `<option value="${i + 1}"${i + 1 === n ? ' selected' : ''}>${hhmm(p.at)} 교대${i === 0 ? ' (다음)' : ''}</option>`).join('');
+    const btn = (t, act, cls) => `<button type="button" class="mini${cls ? ` ${cls}` : ''}" data-act="tsched" data-id="${t.id}" data-sched="${act}">${SCHED_LABEL[act]}</button>`;
+    const rows = tables.map(t => {
+      const now = t.use === false ? '대기' : t.dealerId ? esc(nameOf(t.dealerId)) : '공석';
+      const acts = t.use === false ? btn(t, 'use', 'primary') + btn(t, 'close', 'danger') : btn(t, 'idle') + btn(t, 'close', 'danger');
+      const has = t.sched ? `<span class="tag info">예약 · ${esc(schedText(t))}</span><button type="button" class="mini" data-act="tsched-cancel" data-id="${t.id}">예약 취소</button>` : '';
+      return `<div class="sched-row">${tchip(t.no)}<span class="muted">${now}</span>${has}<span class="acts">${acts}</span></div>`;
+    }).join('');
+    $('tableTitle').innerHTML = tableId && tables[0] ? `${tchip(tables[0].no)} 교대 때 바꾸기` : '교대 때 테이블 바꾸기';
+    $('tableBody').innerHTML = `<p class="hint">지금 바로가 아니라 고른 교대에 바뀝니다. <b>사용 시작</b>이면 그 교대에 오래 쉰 딜러가 들어가고,
+      <b>대기로·깨기</b>면 앉아 있던 딜러가 그 교대에 쉽니다. 로테이션 표에 미리 보입니다.</p>
+      <label class="sched-when">언제 <select id="schedN">${opts}</select></label>
+      <div class="sched-list">${rows || '<p class="empty">열린 테이블이 없습니다</p>'}</div>`;
     $('dlgTable').showModal();
   }
 
@@ -2829,6 +2961,10 @@
 
   // 눌러서 고르고 놓기 — 끌기가 안 되는 화면에서도, 끌다가 글자만 잡혔을 때도 이쪽으로 된다
   $('sheet').addEventListener('click', e => {
+    const th = e.target.closest && e.target.closest('#sheet th[data-coln]');
+    if (th) { setPick(null); openSched(Number(th.dataset.coln)); return; }
+    const tc = e.target.closest && e.target.closest('#sheet td[data-tn]');
+    if (tc) { setPick(null); openSched(Number(tc.dataset.tn), tc.dataset.t); return; }
     const td = sheetCell(e);
     if (pick && dropOk(td)) { applyMove(pick, td); return; }
     if (!td) { setPick(null); return; }

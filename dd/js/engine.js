@@ -47,7 +47,7 @@
       version: VERSION,
       settingsRev: SETTINGS_REV,
       settings: Object.assign({}, DEFAULT_SETTINGS, settings),
-      clock: { running: false, paused: false, nextPushAt: null, pausedAt: null },
+      clock: { running: false, paused: false, nextPushAt: null, pausedAt: null, intervalPlan: null }, // intervalPlan: 교대 간격 예약 {at, minutes}
       tables: [],
       dealers: [],
         history: [],    // 교대 시점마다 {at, a: {딜러id: 테이블번호 | 0(휴식)}}
@@ -100,7 +100,14 @@
       ciAt: null,      // 마지막으로 반영한 휴대폰 출근 체크의 서버 시각 (같은 체크를 두 번 반영하지 않게)
       turn: 0,         // 줄 순번 — 같은 교대에 앉은(쉬러 간) 사람끼리는 먼저 줄 선 사람이 먼저 (queueUp)
     }, d));
-    s.tables = s.tables.map(t => Object.assign({ locked: false, use: true }, t)); // 예전 테이블은 모두 사용 중
+    const ip = s.clock.intervalPlan;
+    if (ip && !(Number.isFinite(ip.at) && ip.at % GRID === 0 && ip.minutes >= 5 && ip.minutes <= 120)) s.clock.intervalPlan = null;
+    if (s.clock.intervalPlan === undefined) s.clock.intervalPlan = null;
+    s.tables = s.tables.map(t => {
+      const x = Object.assign({ locked: false, use: true }, t); // 예전 테이블은 모두 사용 중
+      if (x.sched && !(x.status === 'open' && x.sched && okN(x.sched.n) && SCHED_ACTS.includes(x.sched.act))) delete x.sched;
+      return x;
+    });
     if ((raw.settingsRev || 1) < 2) s.settings.maxWorkMinutes = 0; // 예전 기본값(80분)은 '제한 없음'으로
     s.settingsRev = SETTINGS_REV;
     return s;
@@ -537,13 +544,26 @@
    *  5. 디렉터가 고정한 테이블과 투입 보류한 딜러는 자동 교대에서 뺀다
    *  6. 나머지는 그대로. 최대 근무를 넘겼는데 못 바꾸면 연장 경고
    */
-  function planPush(s, now) {
+  // freed: 이번 교대의 테이블 예약(대기로·깨기)으로 방금 자리에서 나온 딜러 — 이번 교대에는 쉰다
+  //  (다른 빈 테이블로 바로 채우면 자동 교대로 테이블을 옮기는 꼴이 된다)
+  function planPush(s, now, freed) {
     const set = s.settings;
     const maxMs = maxWorkMs(s);
     const shortMs = set.shortSeatMinutes * MIN;
     const tables = usedTables(s);
     const fix = pushPlan(s); // 표에서 끌어다 놓은 예약 (이번 교대 몫)
-    const pool = breakPool(s, now).filter(d => !d.hold && !fix.rest.has(d.id));
+    // 테이블 예약으로 방금 나온 딜러가 낀 맞바꿈은 건너뛴다 — 그 딜러는 이번 교대에 쉰다 (안 그러면 다른 테이블로 옮겨 앉는다)
+    const freedSkip = [];
+    if (freed && freed.size) {
+      const keepPair = ([a, b]) => {
+        if (!freed.has(a) && !freed.has(b)) return true;
+        freedSkip.push(`${nameOfId(s, a)} ↔ ${nameOfId(s, b)}`);
+        return false;
+      };
+      fix.swap = fix.swap.filter(keepPair);
+      fix.trade = fix.trade.filter(keepPair);
+    }
+    const pool = breakPool(s, now).filter(d => !d.hold && !fix.rest.has(d.id) && !(freed && freed.has(d.id)));
     // 지난 교대부터 쉬고 있으면 최소 휴식을 덜 채웠어도 넣는다 ('연속 두 번 휴식 금지'가 우선, 대신 경고)
     const ready = d => isRested(s, d, now) || mustGoIn(s, d);
     const avail = pool.filter(ready);
@@ -652,6 +672,7 @@
     if (vacant.length) warnings.push(`딜러 부족 — ${vacant.map(m => m.tableNo + '번').join(', ')} 공석`);
     if (skippedSwaps.length) warnings.push(`직접 정한 자리 맞바꿈 건너뜀 (그 사이 상황이 달라짐): ${skippedSwaps.join(', ')}`);
     if (skippedTrades.length) warnings.push(`직접 정한 테이블 맞바꿈 건너뜀 (그 교대에 한쪽이 앉지 않음): ${skippedTrades.join(', ')}`);
+    if (freedSkip.length) warnings.push(`직접 정한 교대 건너뜀 (테이블 예약으로 그 교대에 쉬는 딜러): ${freedSkip.join(', ')}`);
 
     out.sort((a, b) => a.tableNo - b.tableNo);
     return {
@@ -830,6 +851,7 @@
       t.use = use;
       if (!use) t.dealerId = null;
       delete t.undo;
+      delete t.sched; // 직접 바꿨으면 예약은 버린다
       nos.push(t.no);
     }
     const what = rangeText(nos);
@@ -852,8 +874,77 @@
     if (d) release(n, d, now);
     Object.assign(t, { status: 'closed', dealerId: null });
     delete t.undo;
+    delete t.sched;
     addLog(n, now, 'table', `${t.no}번 테이블 깨짐${d ? ` — ${d.name} 휴식` : ''}`);
     fillVacancies(n, now); // 공석 테이블이 있으면 바로 메움
+    return n;
+  }
+
+  // ---------- 테이블 예약 (스케줄표에서 그 교대에) ----------
+  // t.sched = {n, act} — 앞으로 n번째 교대에 act 를 한다 (n은 plans와 같이 '몇 번째 교대' — 일시정지로 시각이 밀려도 따라간다)
+  //   'use'   대기 → 사용 시작: 그 교대의 계획 안에서 오래 쉰 딜러가 들어간다
+  //   'idle'  사용 → 대기: 앉아 있던 딜러는 그 교대에 쉬러 간다 (테이블은 열린 채)
+  //   'close' 깨기: 그 교대에 테이블을 깬다
+  // 지금 바로 [사용]을 켜면 그 순간 쉬던 딜러가 들어가 로테가 꼬인다 — 1시에 열 테이블은 1시 교대에 같이 바꾼다 (2026-10-24 사용자 요청)
+  const SCHED_ACTS = ['use', 'idle', 'close'];
+  const SCHED_TEXT = { use: '사용 시작', idle: '대기로', close: '깨기' };
+
+  function scheduleTable(s, tableId, n, act, now) {
+    const t0 = tableOf(s, tableId);
+    if (!s.clock.running || !okN(n) || !SCHED_ACTS.includes(act) || !t0 || t0.status !== 'open') return s;
+    if (act === 'use' && t0.use !== false) return s;   // 이미 사용 중
+    if (act === 'idle' && t0.use === false) return s;  // 이미 대기
+    if (t0.sched && t0.sched.n === n && t0.sched.act === act) return s;
+    const d = draft(s);
+    const t = tableOf(d, tableId);
+    t.sched = { n, act };
+    addLog(d, now, 'table', `[예약] ${t.no}번 테이블 — ${n}번째 교대에 ${SCHED_TEXT[act]}`);
+    return d;
+  }
+
+  function unscheduleTable(s, tableId, now) {
+    const t0 = tableOf(s, tableId);
+    if (!t0 || !t0.sched) return s;
+    const d = draft(s);
+    const t = tableOf(d, tableId);
+    addLog(d, now, 'table', `[예약] ${t.no}번 테이블 ${SCHED_TEXT[t.sched.act]} 예약 취소`);
+    delete t.sched;
+    return d;
+  }
+
+  // 앞으로 n번째 교대 뒤 그 테이블이 쓰이는지 (0 = 지금). 표·메뉴용
+  function tableUsedAt(t, n) {
+    if (!t || t.status !== 'open') return false;
+    if (t.sched && n >= t.sched.n) return t.sched.act === 'use';
+    return t.use !== false;
+  }
+  const tableClosedAt = (t, n) => !t || t.status !== 'open' || !!(t.sched && t.sched.act === 'close' && n >= t.sched.n);
+
+  // 이번 교대(n === 1) 몫 테이블 예약을 교대 계획 직전에 적용한다 (executePush — 미리보기도 같은 길)
+  function applyTableSched(s, at, freed) {
+    const due = s.tables.filter(t => t.status === 'open' && t.sched && t.sched.n === 1);
+    if (!due.length) return s;
+    const n = draft(s);
+    for (const t0 of due) {
+      const t = tableOf(n, t0.id);
+      const act = t.sched.act;
+      delete t.sched;
+      if (act === 'use') {
+        t.use = true;
+        addLog(n, at, 'table', `${t.no}번 테이블 사용 시작 (예약) — 이번 교대에 딜러 투입`);
+        continue;
+      }
+      const d = t.dealerId ? dealerOf(n, t.dealerId) : null;
+      if (d) {
+        release(n, d, at);
+        freed.add(d.id);
+      }
+      t.dealerId = null;
+      delete t.undo;
+      if (act === 'idle') t.use = false;
+      else t.status = 'closed';
+      addLog(n, at, 'table', `${t.no}번 테이블 ${act === 'idle' ? '대기로' : '깨짐'} (예약)${d ? ` — ${d.name} 휴식` : ''}`);
+    }
     return n;
   }
 
@@ -1649,6 +1740,30 @@
     return n;
   }
 
+  // ---------- 교대 간격 예약 ('3시부터 15분 간격') ----------
+  // clock.intervalPlan = {at, minutes}: at(5분 눈금)에 꼭 교대하고, 그 교대부터 minutes분마다 (2026-10-24 사용자 요청 — 명령 입력칸).
+  // clock 안에 두어 되돌리기·저장·미리보기가 같이 따라온다. at이 지나면(그 교대에서) 설정의 교대 간격이 바뀐다
+  function scheduleInterval(s, at, minutes, now) {
+    const m = Math.round(Number(minutes));
+    if (!s.clock.running || !Number.isFinite(at) || !(m >= 5 && m <= 120)) return s;
+    const t = Math.round(at / GRID) * GRID;
+    if (t <= clockNow(s, now)) return s;
+    const n = draft(s);
+    n.clock.intervalPlan = { at: t, minutes: m };
+    // 다음 교대가 그 시각보다 뒤면 그 시각으로 당긴다 — 그 시각에 꼭 교대
+    if (n.clock.nextPushAt != null && n.clock.nextPushAt > t) n.clock.nextPushAt = t;
+    addLog(n, now, 'clock', `[예약] ${hhmmOf(t)}부터 교대 간격 ${m}분`);
+    return n;
+  }
+
+  function cancelIntervalPlan(s, now) {
+    if (!s.clock.intervalPlan) return s;
+    const n = draft(s);
+    addLog(n, now, 'clock', `[예약] ${hhmmOf(n.clock.intervalPlan.at)}부터 교대 간격 ${n.clock.intervalPlan.minutes}분 — 취소`);
+    n.clock.intervalPlan = null;
+    return n;
+  }
+
   function startClock(s, now) {
     const at = floorGrid(now); // 시작 시각도 5분 눈금으로 내린다 — 표의 '진행 중' 칸까지 눈금에 맞게
     const n = draft(s);
@@ -1709,6 +1824,8 @@
     const n = draft(s);
     const p = n.clock.pausedAt;
     n.clock.nextPushAt = gridAt(n.clock.nextPushAt + (now - p), now);
+    const ip = n.clock.intervalPlan; // 간격 예약 시각이 아직 안 지났으면 그 시각에 꼭 교대
+    if (ip && n.clock.nextPushAt > ip.at && ip.at > now) n.clock.nextPushAt = ip.at;
     for (const d of n.dealers.filter(busy)) d.since = now - Math.max(0, p - d.since);
     n.clock.paused = false;
     n.clock.pausedAt = null;
@@ -1722,7 +1839,9 @@
 
   function executePush(s, now) {
     const at = pushTime(s, now); // 손으로 당겨 교대해도 기록은 0분·5분에 남는다
-    const plan = planPush(s, at);
+    const freed = new Set();
+    s = applyTableSched(s, at, freed); // 이번 교대 몫 테이블 예약(사용 시작·대기·깨기)을 먼저 — 그 교대의 계획 안에서 딜러가 들고 난다
+    const plan = planPush(s, at, freed);
     const n = draft(s);
     const outs = {};
     // 줄 순번(turn)이 교대의 순서를 따르게: 나가는 사람은 나갈 순서대로, 들어오는 사람은 들어갈 순서대로 부른다
@@ -1755,14 +1874,23 @@
 
     const c = n.clock;
     if (c.running) {
+      const ip = c.intervalPlan;
+      if (ip && at >= ip.at) { // 예약한 시각의 교대 — 이 교대부터 새 간격
+        if (n.settings.pushMinutes !== ip.minutes) addLog(n, at, 'clock', `교대 간격 ${n.settings.pushMinutes}분 → ${ip.minutes}분 (예약)`);
+        n.settings.pushMinutes = ip.minutes;
+        c.intervalPlan = null;
+      }
       const pushMs = n.settings.pushMinutes * MIN;
       const inTime = c.nextPushAt != null && at >= c.nextPushAt && at - c.nextPushAt < pushMs;
-      c.nextPushAt = gridAt((inTime ? c.nextPushAt : at) + pushMs, at); // 정시 교대는 시간 격자 유지
+      let next = gridAt((inTime ? c.nextPushAt : at) + pushMs, at); // 정시 교대는 시간 격자 유지
+      if (c.intervalPlan && next > c.intervalPlan.at) next = c.intervalPlan.at; // 예약한 시각에 꼭 교대
+      c.nextPushAt = next;
     }
     record(n, at);
     n.past = []; // 딜러가 이미 움직였으므로 교대 전 작업은 되돌리지 않는다
     // 이번 교대 몫 예약은 쓰고 버리고, 나머지는 한 칸씩 당긴다
     n.plans = (s.plans || []).filter(p => p.n > 1).map(p => Object.assign({}, p, { n: p.n - 1 }));
+    for (const t of n.tables) if (t.sched) t.sched.n -= 1; // 이번 몫은 위에서 써서 지웠다
     const changed = plan.moves.filter(m => m.toDealerId).length;
     addLog(n, at, 'push', `교대 — ${changed}테이블 교대, ${plan.kept}테이블 유지`);
     plan.warnings.forEach(w => addLog(n, at, 'warn', w));
@@ -1788,7 +1916,7 @@
         actions: due.map(d => ({ type: 'arrive', id: d.id, label: `${d.name} 출근` })),
       });
     }
-    const idle = idleTables(s).map(t => t.no);
+    const idle = idleTables(s).filter(t => !(t.sched && t.sched.act === 'use')).map(t => t.no); // 사용 예약한 테이블은 알림에서 뺀다
     if (idle.length) {
       out.push({
         level: 'info',
@@ -1869,6 +1997,10 @@
     parseNos,
     rangeText,
     setTableUse,
+    scheduleTable,
+    unscheduleTable,
+    tableUsedAt,
+    tableClosedAt,
     closeTable,
     relieveTable,
     sendHome,
@@ -1912,6 +2044,8 @@
     lastStep,
     revert,
     updateSettings,
+    scheduleInterval,
+    cancelIntervalPlan,
     startClock,
     startClockAt,
     pauseClock,
