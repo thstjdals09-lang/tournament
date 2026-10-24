@@ -9,6 +9,10 @@
  *   - 쉬고 있는 사람 수만큼 바꾼다 → 한 번 쉰 사람은 다음 교대에 반드시 들어간다.
  *     '연속 두 번 휴식'은 쉬는 사람이 바꿀 수 있는 테이블보다 많을 때만 생긴다 (8테이블 20명 같은 경우)
  *   - 하루치를 되짚어 '총 휴식 시간'을 맞추지 않는다 — 그러면 늦게 출근한 사람이 계속 쉬게 된다
+ *   - 다른 업무(칩 정리·등록 등) 중인 딜러는 테이블에 없지만 근무로 센다 (로테에 들어간 것과 같게) —
+ *     업무 시간은 휴식이 아니고, 끝나면 테이블에서 막 나온 사람처럼 그때부터 쉰다
+ *
+ * 딜러 상태: planned(출근 예정·출근 전) → break(휴식) ⇄ working(테이블) ⇄ duty(다른 업무) → off(퇴근)
  *   → 모두 같은 시각에 시작하면 1·2번 → 3·4번 … 순서가 되고,
  *     출근 시각·테이블 오픈/깨짐이 섞여도 "쉬면 바로 다음 차례"가 지켜진다.
  */
@@ -34,6 +38,8 @@
     warnBeforeMinutes: 2, // 교대 예고 알림
     autoPush: true,
     voice: true,
+    openUse: false,       // 테이블을 열 때 바로 사용(딜러 투입)할지 — 끄면 '대기'로 열고 칸에서 [사용]을 체크할 때 투입
+    autoArrive: false,    // 출근 체크 없이도 예정 시각에 자동 출근 — 기본은 꺼짐: 딜러가 출근 QR로 체크해야 투입 (사용자 요청)
   };
 
   function createState(settings) {
@@ -49,11 +55,13 @@
       roster: [],     // 출근자 명단 {name, grade} — 체크하면 출근, 풀면 퇴근
                       // 체크 상태는 따로 두지 않는다: 그 이름의 딜러가 출근해 있으면 체크된 것 (rosterView)
       eoCall: { open: false, id: null, at: null }, // 휴대폰으로 퇴근 희망 받기 (열려 있으면 모든 딜러 휴대폰에 버튼)
+      button: null,   // 오늘 버튼 {no: 1~9, at} — 무작위로 뽑아 디렉터·딜러 휴대폰·TV에 보인다
       past: [],       // 작업 되돌리기용 — 작업 직전 모습 {at, label, snap | full}
       plans: [],      // 표에서 끌어다 놓은 교대 예약 — {n, type, a, b}. n = 앞으로 n번째 교대(1 = 다음 교대)
                       // type 'swap': a와 b의 자리를 맞바꾼다 / 'rest': a를 쉬게 / 'keep': a를 안 빼고 그대로
       log: [],
       seq: 0,
+      turnSeq: 0,     // 줄 순번 계수기 — 자리에 앉거나 쉬러 갈 때마다 1씩 (딜러의 turn)
     };
   }
 
@@ -69,6 +77,7 @@
       notices: raw.notices || [],
       roster: rosterEntries(raw.roster),
       eoCall: Object.assign({}, base.eoCall, raw.eoCall),
+      button: raw.button || null,
       past: raw.past || [],
       plans: planEntries(raw.plans),
     });
@@ -83,8 +92,15 @@
       eoAsk: null,
       eoStay: false,
       eoAt: null,
+      planAt: null,    // 출근 예정 시각 (출근 전일 때만)
+      task: null,      // 다른 업무 내용 (업무 중일 때만)
+      totalDutyMs: 0,  // 다른 업무 한 시간
+      inBase: null,    // 이번에 출근할 때의 누적 시간 {w, r, d} — '출근 시간 변경'으로 출근 전으로 되돌릴 때
+      checkAt: null,   // 출근 체크한 시각 (출근 QR 또는 디렉터) — 예정 시각 전에 체크하면 예정 시각에 투입
+      ciAt: null,      // 마지막으로 반영한 휴대폰 출근 체크의 서버 시각 (같은 체크를 두 번 반영하지 않게)
+      turn: 0,         // 줄 순번 — 같은 교대에 앉은(쉬러 간) 사람끼리는 먼저 줄 선 사람이 먼저 (queueUp)
     }, d));
-    s.tables = s.tables.map(t => Object.assign({ locked: false }, t));
+    s.tables = s.tables.map(t => Object.assign({ locked: false, use: true }, t)); // 예전 테이블은 모두 사용 중
     if ((raw.settingsRev || 1) < 2) s.settings.maxWorkMinutes = 0; // 예전 기본값(80분)은 '제한 없음'으로
     s.settingsRev = SETTINGS_REV;
     return s;
@@ -113,10 +129,15 @@
 
   const dealerOf = (s, id) => s.dealers.find(d => d.id === id);
   const tableOf = (s, id) => s.tables.find(t => t.id === id);
-  const activeTables = s => s.tables.filter(t => t.status === 'open').sort(byNo);
+  const activeTables = s => s.tables.filter(t => t.status === 'open').sort(byNo); // 열린 테이블 (대기 포함 — 화면용)
+  // 딜러를 넣는 테이블: 열려 있고 '사용' 체크된 것. 대기 테이블은 공석 알림·교대·필요 인원에서 빠진다
+  const usedTables = s => activeTables(s).filter(t => t.use !== false);
+  const idleTables = s => activeTables(s).filter(t => t.use === false);
   const working = s => s.dealers.filter(d => d.status === 'working');
-  const onDuty = s => s.dealers.filter(d => d.status !== 'off');
-  const isFresh = d => d.totalWorkMs === 0; // 출근 후 아직 한 번도 안 앉음
+  const busy = d => d.status === 'working' || d.status === 'duty'; // 근무로 침 (테이블 또는 다른 업무)
+  const present = d => busy(d) || d.status === 'break';            // 출근해 있음 (출근 예정·퇴근 제외)
+  const onDuty = s => s.dealers.filter(present);
+  const isFresh = d => d.totalWorkMs === 0 && !d.totalDutyMs; // 출근 후 아직 한 번도 안 앉음
 
   // 투입 보류 중(쉬는 중 + 보류) — 식사·다른 일을 하는 중이므로 '휴식'으로 치지 않는다
   const isHeld = d => d.status === 'break' && d.hold;
@@ -136,9 +157,9 @@
     return c.nextPushAt - clockNow(s, now);
   }
 
-  // 휴식 없이 이어서 일한 시간 (지금 앉은 테이블 포함) — 최대 연속 근무를 재는 값
+  // 휴식 없이 이어서 일한 시간 (지금 앉은 테이블·다른 업무 포함)
   function workedMs(s, d, now) {
-    if (d.status !== 'working') return d.streakMs;
+    if (!busy(d)) return d.streakMs;
     return d.streakMs + Math.max(0, clockNow(s, now) - d.since);
   }
 
@@ -166,8 +187,10 @@
 
   // 들어갈 순서: 첫 출근 → 지금 오래 쉰 사람 순 (보류였던 시간은 빼고)
   // 누적 장부로 줄 세우지 않는다 (사용자 요청): 하루치 휴식 시간을 맞추려 들면 늦게 온 사람이 계속 쉬게 된다
+  // 같은 교대에 함께 쉬러 나와 쉰 시간이 똑같으면 먼저 줄 선 사람(turn이 작은 쪽)부터 — 나갈 순서와 짝을 이뤄
+  // 딜러들이 한 줄로 돈다. 이게 없으면 동점이 늘 같은 쪽으로 풀려 같은 두 사람이 한 테이블에서만 주고받는다 (2026-10-24 제보)
   function inOrder(s, now) {
-    return (a, b) => (isFresh(b) - isFresh(a)) || restedMs(b, now) - restedMs(a, now);
+    return (a, b) => (isFresh(b) - isFresh(a)) || restedMs(b, now) - restedMs(a, now) || (a.turn || 0) - (b.turn || 0);
   }
   const breakPool = (s, now) => s.dealers.filter(d => d.status === 'break')
     .sort(now == null ? (a, b) => a.since - b.since : inOrder(s, now));
@@ -176,7 +199,7 @@
   // 최대 근무가 정해져 있으면: 쉬지 않고 일할 수 있는 교대 횟수 k → 테이블 T개면 T + ceil(T/k) 명
   // 제한이 없으면: 테이블 수만큼만 있으면 된다 (남는 사람은 그만큼 교대가 돈다)
   function staffing(s) {
-    const tables = activeTables(s).length;
+    const tables = usedTables(s).length;
     const limited = hasWorkLimit(s);
     const k = Math.max(1, Math.floor(s.settings.maxWorkMinutes / s.settings.pushMinutes));
     const duty = onDuty(s);
@@ -187,22 +210,29 @@
       active: duty.length,
       working: duty.filter(d => d.status === 'working').length,
       onBreak: duty.filter(d => d.status === 'break').length,
+      onTask: duty.filter(d => d.status === 'duty').length,
+      // 테이블에 넣을 수 있는 사람 (근무 + 휴식) — 다른 업무 중인 사람은 빼고 센다 (2026-10-24 검토)
+      available: duty.filter(d => d.status !== 'duty').length,
+      planned: s.dealers.filter(d => d.status === 'planned').length,
       recommended,
-      diff: duty.length - recommended,
+      diff: duty.filter(d => d.status !== 'duty').length - recommended,
+      idle: idleTables(s).length,
     };
   }
 
   // 퇴근 희망자를 먼저 말한 순서대로 — 직접 표시한 것도 휴대폰 답도 같은 줄에 세운다.
   // 시각이 없는 예전 자료는 출근이 이른 사람부터 (적어도 순서가 흔들리지는 않게)
-  const eoOrder = s => s.dealers.filter(d => d.status !== 'off' && d.earlyOut)
+  const eoOrder = s => s.dealers.filter(d => present(d) && d.earlyOut)
     .sort((a, b) => (a.eoAt || a.checkInAt) - (b.eoAt || b.checkInAt) || a.checkInAt - b.checkInAt);
 
-  // 지금 누가 어디 있는지: {딜러id: 테이블번호 | 0(휴식)} — 퇴근자는 빠진다
+  // 지금 누가 어디 있는지: {딜러id: 테이블번호 | 0(휴식) | -2(다른 업무)} — 퇴근자·출근 전은 빠진다
+  const DUTY = -2;
   function snapshot(s) {
     const a = {};
     for (const d of s.dealers) {
       if (d.status === 'working') a[d.id] = tableOf(s, d.tableId).no;
       else if (d.status === 'break') a[d.id] = 0;
+      else if (d.status === 'duty') a[d.id] = DUTY;
     }
     return a;
   }
@@ -221,8 +251,15 @@
     if (s.history.length > 60) s.history.splice(0, s.history.length - 60);
   }
 
+  // 줄 뒤에 선다 — 자리에 앉을 때와 쉬러 갈 때마다 새 순번 (교대에서는 나갈 순서·들어갈 순서대로 부른다)
+  function queueUp(s, d) {
+    s.turnSeq = (s.turnSeq || 0) + 1;
+    d.turn = s.turnSeq;
+  }
+
   function release(s, d, now) {
     const t = tableOf(s, d.tableId);
+    queueUp(s, d);
     const worked = Math.max(0, clockNow(s, now) - d.since);
     d.streakMs += worked;
     d.totalWorkMs += worked;
@@ -253,8 +290,25 @@
     if (rest >= s.settings.minRestMinutes * MIN) d.streakMs = 0;
   }
 
+  // 다른 업무 끝 → 휴식. 업무 시간은 연속 근무로 이어서 센다 (테이블에서 일한 것과 같게)
+  function finishDuty(s, d, now) {
+    if (d.status !== 'duty') return;
+    const worked = Math.max(0, clockNow(s, now) - d.since);
+    d.streakMs += worked;
+    d.totalDutyMs = (d.totalDutyMs || 0) + worked;
+    d.status = 'break';
+    d.since = now;
+    d.holdMs = 0;
+    d.holdAt = null;
+    d.task = null;
+    queueUp(s, d);
+  }
+
+  // 이번에 출근할 때의 누적 시간 — '출근 시간 변경'으로 출근 전으로 되돌릴 때 이 값으로 돌린다
+  const baseOf = d => ({ w: d.totalWorkMs, r: d.totalRestMs, d: d.totalDutyMs || 0, h: d.totalHoldMs || 0 });
+
   // '미투입' 되돌리기에 필요한 딜러 상태
-  const UNDO_FIELDS = ['status', 'since', 'tableId', 'lastTableId', 'streakMs', 'totalWorkMs', 'totalRestMs',
+  const UNDO_FIELDS = ['status', 'since', 'tableId', 'lastTableId', 'streakMs', 'totalWorkMs', 'totalRestMs', 'turn',
     'holdMs', 'holdAt', 'totalHoldMs'];
   function keep(d) {
     const o = {};
@@ -271,6 +325,7 @@
     d.holdAt = null;
     d.tableId = t.id;
     d.since = clockNow(s, now);
+    queueUp(s, d);
     t.dealerId = d.id;
     t.undo = {
       at: now,
@@ -303,7 +358,7 @@
   }
 
   function fillVacancies(s, now) {
-    for (const t of activeTables(s).filter(t => !t.dealerId).sort(featureFirst)) {
+    for (const t of usedTables(s).filter(t => !t.dealerId).sort(featureFirst)) {
       const pick = pickFromPool(s, now, t.feature);
       if (!pick) return;
       seatMidInterval(s, pick.dealer, t, now, pick.short);
@@ -347,19 +402,21 @@
   // 저장된 예약은 믿지 않고 모양을 맞춘다 (파이어베이스가 0·빈 값을 지우므로)
   function planEntries(raw) {
     if (!Array.isArray(raw)) return [];
+    const pair = p => p.type === 'swap' || p.type === 'trade';
     return raw.filter(p => p && Number.isFinite(p.n) && p.n >= 1 && p.n <= PLAN_MAX && typeof p.a === 'string'
-      && (p.type === 'swap' ? typeof p.b === 'string' && p.b !== p.a : p.type === 'rest' || p.type === 'keep'))
-      .map(p => (p.type === 'swap' ? { n: p.n, type: 'swap', a: p.a, b: p.b } : { n: p.n, type: p.type, a: p.a }))
+      && (pair(p) ? typeof p.b === 'string' && p.b !== p.a : p.type === 'rest' || p.type === 'keep'))
+      .map(p => (pair(p) ? { n: p.n, type: p.type, a: p.a, b: p.b } : { n: p.n, type: p.type, a: p.a }))
       .slice(-PLAN_MAX);
   }
 
   // 이번 교대(n === 1)에 적용할 예약. 퇴근한 딜러가 낀 것은 버린다
   function pushPlan(s) {
     const live = id => { const d = dealerOf(s, id); return !!d && d.status !== 'off'; };
-    const fix = { rest: new Set(), keep: new Set(), swap: [] };
+    const fix = { rest: new Set(), keep: new Set(), swap: [], trade: [] };
     for (const p of s.plans || []) {
       if (p.n !== 1) continue;
       if (p.type === 'swap') { if (live(p.a) && live(p.b)) fix.swap.push([p.a, p.b]); continue; }
+      if (p.type === 'trade') { if (live(p.a) && live(p.b)) fix.trade.push([p.a, p.b]); continue; }
       if (!live(p.a)) continue;
       if (p.type === 'rest') fix.rest.add(p.a);
       else if (p.type === 'keep') fix.keep.add(p.a);
@@ -382,6 +439,7 @@
    */
   function applySwaps(s, moves, swaps) {
     const cur = snapshot(s);
+    for (const id in cur) if (cur[id] < 0) delete cur[id]; // 다른 업무 중인 딜러는 맞바꿈에 끼지 않는다
     const end = Object.assign({}, cur);
     for (const m of moves) if (m.fromDealerId) end[m.fromDealerId] = 0;
     for (const m of moves) if (m.toDealerId) end[m.toDealerId] = m.tableNo;
@@ -417,7 +475,7 @@
     const seatOf = {}; // 테이블 번호 → 교대 뒤 딜러
     for (const id in end) if (end[id]) seatOf[end[id]] = id;
     const out = [];
-    for (const t of activeTables(s)) {
+    for (const t of usedTables(s)) {
       const from = t.dealerId || null;
       const to = seatOf[t.no] || null;
       if (from === to && from !== null) continue; // 그대로 앉아 있는 테이블은 교대가 아니다
@@ -428,6 +486,44 @@
   }
 
   const nameOfId = (s, id) => (dealerOf(s, id) || {}).name || '?';
+
+  /*
+   * '테이블 맞바꿈' 예약 — 표의 예정 칸에서 테이블 칸을 같은 시각 다른 딜러의 테이블 칸에 끌어다 놓은 것 (2026-10-24 사용자 요청).
+   * 그 교대 뒤 두 사람이 앉을 테이블을 서로 바꾼다. 둘 다 그 교대 뒤 앉아 있어야 한다 (한쪽이 쉬면 '맞바꿈'(휴식 넘기기)의 일).
+   * ※ 자동 교대는 앉은 딜러를 다른 테이블로 옮기지 않는다 — 옮겨지는 건 디렉터가 이렇게 직접 정한 경우뿐이다
+   *   (지정·바로잡기와 같은 '디렉터가 직접 한 이동'). 그 사이 상황이 달라져 한쪽이 앉지 않게 되면 건너뛰고 경고만 남긴다.
+   */
+  function applyTrades(s, moves, trades) {
+    const cur = snapshot(s);
+    for (const id in cur) if (cur[id] < 0) delete cur[id]; // 다른 업무 중인 딜러는 끼지 않는다
+    const end = Object.assign({}, cur);
+    for (const m of moves) if (m.fromDealerId) end[m.fromDealerId] = 0;
+    for (const m of moves) if (m.toDealerId) end[m.toDealerId] = m.tableNo;
+    const used = new Set();
+    const traded = new Set();
+    const skipped = [];
+    for (const [a, b] of trades) {
+      if (used.has(a) || used.has(b) || !(end[a] > 0) || !(end[b] > 0) || end[a] === end[b]) {
+        skipped.push(`${nameOfId(s, a)} ↔ ${nameOfId(s, b)}`);
+        continue;
+      }
+      [end[a], end[b]] = [end[b], end[a]];
+      [a, b].forEach(id => { used.add(id); traded.add(id); });
+    }
+    if (!traded.size) return { moves: null, toBreak: null, skipped };
+    const kindOf = new Map(moves.filter(m => m.toDealerId).map(m => [m.toDealerId, m.kind]));
+    const seatOf = {}; // 테이블 번호 → 교대 뒤 딜러
+    for (const id in end) if (end[id] > 0) seatOf[end[id]] = id;
+    const out = [];
+    for (const t of usedTables(s)) {
+      const from = t.dealerId || null;
+      const to = seatOf[t.no] || null;
+      if (from === to && from !== null) continue;
+      out.push(move(t, from ? dealerOf(s, from) : null, to ? dealerOf(s, to) : null,
+        !to ? 'vacant' : traded.has(to) && cur[to] > 0 ? 'trade' : (kindOf.get(to) || 'in')));
+    }
+    return { moves: out, toBreak: Object.keys(end).filter(id => cur[id] > 0 && !(end[id] > 0)), skipped };
+  }
 
   /*
    * 교대 규칙
@@ -445,7 +541,7 @@
     const set = s.settings;
     const maxMs = maxWorkMs(s);
     const shortMs = set.shortSeatMinutes * MIN;
-    const tables = activeTables(s);
+    const tables = usedTables(s);
     const fix = pushPlan(s); // 표에서 끌어다 놓은 예약 (이번 교대 몫)
     const pool = breakPool(s, now).filter(d => !d.hold && !fix.rest.has(d.id));
     // 지난 교대부터 쉬고 있으면 최소 휴식을 덜 채웠어도 넣는다 ('연속 두 번 휴식 금지'가 우선, 대신 경고)
@@ -472,13 +568,15 @@
       const seated = seatedMs(s, d, now);   // 지금 이 자리에 앉아 있은 시간
       return { t, d, worked, seated, over: worked >= maxMs };
     });
-    // 지금 자리에 오래 앉아 있는 사람부터 나간다 (방금 앉은 사람은 빼지 않는다)
+    // 지금 자리에 오래 앉아 있는 사람부터 나간다 (방금 앉은 사람은 빼지 않는다).
+    // 같은 교대에 앉아 앉은 시간이 똑같으면 먼저 줄 서서 앉은 사람(turn이 작은 쪽)부터 — 테이블 번호로만 풀면
+    // 늘 번호가 작은 테이블만 바뀌어 같은 두 사람이 그 테이블에서만 주고받는다 (2026-10-24 제보)
     // 예약으로 '쉬게' 한 사람은 맨 앞에(짧게 앉았어도), '그대로'인 사람은 아예 빼지 않는다.
     // 들어올 사람이 없으면 짝이 안 지어져 그냥 일하게 되므로, 예약 때문에 공석이 생기지는 않는다
     const outQueue = occupied.filter(x => !x.t.locked && !fix.keep.has(x.d.id)
       && (fix.rest.has(x.d.id) || x.seated >= shortMs))
       .sort((a, b) => (fix.rest.has(b.d.id) - fix.rest.has(a.d.id))
-        || (b.over - a.over) || b.seated - a.seated || a.t.no - b.t.no);
+        || (b.over - a.over) || b.seated - a.seated || (a.d.turn || 0) - (b.d.turn || 0) || a.t.no - b.t.no);
 
     const isA = d => d.grade === 'A';
     const left = avail.slice();
@@ -503,10 +601,26 @@
       left.splice(left.indexOf(n), 1);
       pairs.push({ x, n });
     }
-    // 피처 테이블은 짝지은 그대로, 나머지는 방금 나온 테이블을 피해서 배치
+    // 피처 테이블은 짝지은 그대로, 나머지는 방금 나온 테이블을 피해서 배치.
+    // 앞에서부터 고르면 뒤 테이블에 '방금 나온 사람'만 남을 수 있다 → 둘씩 자리를 바꿔 나아지면 바꾼다
     const incoming = pairs.filter(p => !p.x.t.feature).map(p => p.n);
+    const placed = pairs.filter(p => !p.x.t.feature).map(p => ({ t: p.x.t, d: takeBest(p.x.t, incoming) }));
+    for (let better = true; better;) {
+      better = false;
+      for (let i = 0; i < placed.length; i++) {
+        for (let j = i + 1; j < placed.length; j++) {
+          const a = placed[i];
+          const b = placed[j];
+          if (fitScore(a.t, b.d) + fitScore(b.t, a.d) < fitScore(a.t, a.d) + fitScore(b.t, b.d)) {
+            [a.d, b.d] = [b.d, a.d];
+            better = true;
+          }
+        }
+      }
+    }
+    const seatFor = new Map(placed.map(x => [x.t.id, x.d]));
     for (const p of pairs) {
-      moves.push(move(p.x.t, p.x.d, p.x.t.feature ? p.n : takeBest(p.x.t, incoming), 'in'));
+      moves.push(move(p.x.t, p.x.d, p.x.t.feature ? p.n : seatFor.get(p.x.t.id), 'in'));
     }
     const chosen = pairs.map(p => p.x);
     let out = moves;
@@ -517,7 +631,16 @@
       skippedSwaps = sw.skipped;
       if (sw.moves) { out = sw.moves; toBreak = sw.toBreak; }
     }
+    let skippedTrades = [];
+    if (fix.trade.length) { // 휴식 넘기기까지 정해진 뒤의 자리에서 테이블만 맞바꾼다
+      const tr = applyTrades(s, out, fix.trade);
+      skippedTrades = tr.skipped;
+      if (tr.moves) { out = tr.moves; toBreak = tr.toBreak; }
+    }
 
+    const outOrder = new Map(chosen.map((x, i) => [x.d.id, i]));
+    const ord = id => (outOrder.has(id) ? outOrder.get(id) : Infinity);
+    toBreak = toBreak.slice().sort((a, b) => ord(a) - ord(b));
     const relieved = new Set(toBreak);
     const over = occupied.filter(x => !relieved.has(x.d.id) && x.over);
     const vacant = out.filter(m => !m.toDealerId);
@@ -528,6 +651,7 @@
     }
     if (vacant.length) warnings.push(`딜러 부족 — ${vacant.map(m => m.tableNo + '번').join(', ')} 공석`);
     if (skippedSwaps.length) warnings.push(`직접 정한 자리 맞바꿈 건너뜀 (그 사이 상황이 달라짐): ${skippedSwaps.join(', ')}`);
+    if (skippedTrades.length) warnings.push(`직접 정한 테이블 맞바꿈 건너뜀 (그 교대에 한쪽이 앉지 않음): ${skippedTrades.join(', ')}`);
 
     out.sort((a, b) => a.tableNo - b.tableNo);
     return {
@@ -539,8 +663,10 @@
     };
   }
 
-  // 지금 상태 그대로 간다고 가정하고 앞으로 count번의 교대를 미리 돌려본다
-  function project(s, count) {
+  // 지금 상태 그대로 간다고 가정하고 앞으로 count번의 교대를 미리 돌려본다.
+  // 출근 예정 딜러는 (now 뒤 예정이면) 제시간에 출근 체크한다고 보고 예정 시각 뒤 가장 가까운 교대에 넣는다.
+  // 예정 시각이 지났는데 체크 안 한 딜러는 언제 올지 모르므로 빼고 (now를 안 주면 모두 제시간으로)
+  function project(s, count, now) {
     if (!s.clock.running) return [];
     let cur = s;
     if (s.clock.paused) {
@@ -553,8 +679,20 @@
     // 예정 표가 실제 교대와 어긋난다. 마지막 한 줄만 남겨 둔다 (2026-10-11)
     cur = Object.assign({}, cur, { log: [], history: cur.history.slice(-1), past: [] });
     const out = [];
+    const assume = now == null ? -Infinity : now;
     for (let i = 0; i < count; i++) {
-      const at = cur.clock.nextPushAt;
+      // 첫 칸: 교대 시각이 이미 지났으면(자동 교대를 껐거나 늦게 누름) 지금 누르면 기록될 시각으로 — executePush와 같게.
+      // 안 그러면 휴식·앉은 시간을 실제와 다른 시각으로 재서 예정 표가 실제와 어긋난다 (2026-10-24 검토)
+      const late = i === 0 && now != null && !s.clock.paused && now > cur.clock.nextPushAt;
+      const at = late ? pushTime(cur, now) : cur.clock.nextPushAt;
+      // 출근 예정 딜러는 디렉터 PC의 1초 박자(arriveDue)처럼 각자 예정 시각에 출근시킨다 — 교대 사이에 와서
+      // 빈 테이블에 바로 앉을 수 있으므로, 교대 시각에 한꺼번에 넣으면 앉은 시간이 달라져 실제 교대와 어긋난다 (2026-10-24 검토)
+      const from = i === 0 ? assume : out[i - 1].at;
+      const cutoff = late ? now : at;
+      // 같은 순간에 오는 사람은 한꺼번에 (1초 박자도 한 번에 출근시키고 빈자리를 채운다)
+      const due = cur.dealers.filter(d => isDue(cur, d, cutoff, assume));
+      const times = [...new Set(due.map(d => Math.max(d.planAt, from)))].sort((a, b) => a - b);
+      for (const t of times) cur = arrive(cur, due.filter(d => Math.max(d.planAt, from) === t).map(d => d.id), t, true);
       const res = executePush(cur, at);
       cur = res.state;
       out.push({ at, a: snapshot(cur), plan: res.plan });
@@ -566,22 +704,26 @@
 
   // ---------- 공개 동작 ----------
 
-  // entries: 이름 문자열 또는 {name, grade}
+  // entries: 이름 문자열 또는 {name, grade, at}
+  //  at이 지금보다 뒤면 '출근 예정'으로 (그 시각이 되면 자동 출근), 앞이면 그 시각에 출근한 것으로 기록
   function addDealers(s, entries, now, grade) {
     const n = draft(s);
     for (const raw of entries) {
       const e = typeof raw === 'object' && raw ? raw : { name: raw };
       const name = String(e.name || '').trim();
       if (!name) continue;
+      const at = Number.isFinite(e.at) ? e.at : null;
+      const planned = at != null && at > now;
+      const inAt = at != null && !planned ? at : now;
       n.dealers.push({
         id: `d${++n.seq}`,
         name,
         grade: e.grade || grade || 'B',
-        status: 'break',
+        status: planned ? 'planned' : 'break',
         hold: false,
         holdMs: 0,       // 이번 휴식 구간에서 보류였던 시간
         holdAt: null,    // 보류 시작 시각 (보류 중이 아니면 null)
-        sessions: [{ in: now, out: null }],
+        sessions: planned ? [] : [{ in: inAt, out: null }],
         since: now,
         tableId: null,
         lastTableId: null,
@@ -589,14 +731,21 @@
         totalWorkMs: 0,
         totalRestMs: 0,
         totalHoldMs: 0,  // 오늘 보류였던 시간 (휴식 시간에 넣지 않는다)
-        checkInAt: now,
+        totalDutyMs: 0,
+        checkInAt: planned ? null : inAt,
         checkOutAt: null,
         earlyOut: false, // 퇴근 희망
         eoAsk: null,     // 디렉터가 휴대폰으로 물어본 질문 id (답 오기 전까지)
         eoStay: false,   // 물어봤더니 '계속 일할게요'
         eoAt: null,      // 마지막으로 반영한 휴대폰 답의 서버 시각
+        planAt: planned ? at : null,
+        task: null,
+        inBase: planned ? null : { w: 0, r: 0, d: 0 },
+        checkAt: null,
+        ciAt: null,
       });
-      addLog(n, now, 'dealer', `${name} 출근`);
+      queueUp(n, n.dealers[n.dealers.length - 1]); // 같이 적은 사람끼리는 적은 순서대로 줄을 선다
+      addLog(n, now, 'dealer', planned ? `${name} 출근 예정 ${clock(at)}` : `${name} 출근${at != null ? ` (${clock(at)})` : ''}`);
       // 직접 적어 출근시킨 사람도 명단에 올려 둔다 (명단 화면과 같은 목록을 보게)
       if (!n.roster.some(r => r.name === name)) n.roster.push({ name, grade: e.grade || grade || 'B' });
     }
@@ -630,26 +779,68 @@
     return out.join(', ');
   }
 
+  // opts.use === false면 '대기'로 연다 (테이블은 열려 있고 딜러는 안 넣음 — 칸에서 [사용]을 체크하면 투입).
+  // 바로 사용으로 열 때 이미 대기로 열려 있던 번호는 사용으로 바꾼다 (구간으로 한꺼번에 사용)
   function openTable(s, nos, now, opts) {
     const feature = !!(opts && opts.feature);
+    const use = !(opts && opts.use === false);
     const n = draft(s);
     const opened = [];
+    const started = [];
     for (const no of nos) {
       let t = n.tables.find(x => x.no === no);
-      if (t && t.status === 'open') continue;
+      if (t && t.status === 'open') {
+        if (use && t.use === false) {
+          t.use = true;
+          started.push(t);
+        }
+        continue;
+      }
       if (!t) {
-        t = { id: `t${no}`, no, status: 'open', feature, dealerId: null, openedAt: now };
+        t = { id: `t${no}`, no, status: 'open', feature, use, dealerId: null, openedAt: now };
         n.tables.push(t);
       } else {
-        Object.assign(t, { status: 'open', feature, dealerId: null, openedAt: now });
+        Object.assign(t, { status: 'open', feature, use, dealerId: null, openedAt: now });
       }
       opened.push(t);
     }
-    if (opened.length) addLog(n, now, 'table', `${rangeText(opened.map(t => t.no))}번 테이블 오픈${feature ? ' (피처)' : ''}`);
+    if (opened.length) addLog(n, now, 'table', `${rangeText(opened.map(t => t.no))}번 테이블 오픈${feature ? ' (피처)' : ''}${use ? '' : ' — 대기 (사용을 체크하면 딜러 투입)'}`);
+    if (started.length) addLog(n, now, 'table', `${rangeText(started.map(t => t.no))}번 테이블 사용 — 딜러 투입`);
     n.tables.sort(byNo);
     fillVacancies(n, now);
-    const empty = opened.filter(t => !t.dealerId);
+    const empty = opened.concat(started).filter(t => t.use && !t.dealerId);
     if (empty.length) addLog(n, now, 'warn', `대기 딜러 없음 — ${empty.map(t => t.no + '번').join(', ')} 공석`);
+    return n;
+  }
+
+  // 열린 테이블의 '사용' 체크. 켜면 다음 순서 딜러를 바로 넣고, 끄면 앉아 있던 딜러는 휴식 (테이블은 열린 채 대기)
+  function setTableUse(s, tableIds, use, now) {
+    const want = s.tables.filter(t => tableIds.includes(t.id) && t.status === 'open' && (t.use !== false) !== use);
+    if (!want.length) return s;
+    const n = draft(s);
+    const nos = [];
+    const rested = [];
+    for (const t0 of want) {
+      const t = tableOf(n, t0.id);
+      if (!use && t.dealerId) {
+        const d = dealerOf(n, t.dealerId);
+        release(n, d, now);
+        rested.push(d.name);
+      }
+      t.use = use;
+      if (!use) t.dealerId = null;
+      delete t.undo;
+      nos.push(t.no);
+    }
+    const what = rangeText(nos);
+    addLog(n, now, 'table', use
+      ? `${what}번 테이블 사용 — 딜러 투입`
+      : `${what}번 테이블 사용 안 함 (대기)${rested.length ? ` — ${rested.join(', ')} 휴식` : ''}`);
+    fillVacancies(n, now);
+    if (use) {
+      const empty = want.map(t => tableOf(n, t.id)).filter(t => !t.dealerId);
+      if (empty.length) addLog(n, now, 'warn', `대기 딜러 없음 — ${empty.map(t => t.no + '번').join(', ')} 공석`);
+    }
     return n;
   }
 
@@ -670,7 +861,7 @@
   function relieveTable(s, tableId, now) {
     const n = draft(s);
     const t = tableOf(n, tableId);
-    if (!t || t.status !== 'open') return s;
+    if (!t || t.status !== 'open' || t.use === false) return s;
     const pick = pickFromPool(n, now, t.feature);
     if (!pick) {
       addLog(n, now, 'warn', `${t.no}번 교체 불가 — 대기 딜러 없음`);
@@ -684,8 +875,9 @@
   function sendHome(s, dealerId, now) {
     const n = draft(s);
     const d = dealerOf(n, dealerId);
-    if (!d || d.status === 'off') return s;
+    if (!d || !present(d)) return s;
     if (d.status === 'working') release(n, d, now);
+    finishDuty(n, d, now);
     endBreak(n, d, now);
     d.status = 'off';
     d.hold = false;
@@ -704,10 +896,201 @@
     const n = draft(s);
     const d = dealerOf(n, dealerId);
     if (!d || d.status !== 'off') return s;
-    Object.assign(d, { status: 'break', since: now, streakMs: 0, checkOutAt: null, earlyOut: false, eoAsk: null, eoStay: false, hold: false, holdMs: 0, holdAt: null });
+    Object.assign(d, { status: 'break', since: now, streakMs: 0, checkOutAt: null, earlyOut: false, eoAsk: null, eoStay: false, hold: false, holdMs: 0, holdAt: null, planAt: null, inBase: baseOf(d) });
     d.sessions.push({ in: now, out: null });
+    queueUp(n, d);
     addLog(n, now, 'dealer', `${d.name} 복귀`);
     fillVacancies(n, now);
+    return n;
+  }
+
+  // ---------- 출근 예정 · 자동 출근 · 출근 시간 변경 ----------
+
+  // 출근 예정 딜러를 출근시킨다. auto면 예정 시각에 출근한 것으로 기록 (자동 출근)
+  // 처음 오는 사람이면 '첫 출근'이라 공석이 있으면 바로, 없으면 다음 교대에 첫 번째로 들어간다.
+  // 퇴근했다 다시 오는 사람은 복귀(checkBack)와 같다 — 지금부터 쉬기 시작해 오래 쉰 순서대로
+  function arrive(s, ids, now, auto) {
+    const list = s.dealers.filter(d => ids.includes(d.id) && d.status === 'planned');
+    if (!list.length) return s;
+    const n = draft(s);
+    for (const d0 of list.sort((a, b) => (a.planAt || 0) - (b.planAt || 0))) {
+      const d = dealerOf(n, d0.id);
+      const at = auto && d.planAt != null && d.planAt <= now ? d.planAt : now;
+      Object.assign(d, {
+        status: 'break', since: now, tableId: null, streakMs: 0, hold: false, holdMs: 0, holdAt: null,
+        planAt: null, checkAt: null, checkOutAt: null, earlyOut: false, eoAsk: null, eoStay: false, inBase: baseOf(d),
+      });
+      d.sessions.push({ in: at, out: null });
+      if (d.checkInAt == null) d.checkInAt = at;
+      queueUp(n, d);
+      addLog(n, now, 'dealer', auto ? `${d.name} 출근 (예정 ${clock(at)} — 자동)` : `${d.name} 출근`);
+    }
+    fillVacancies(n, now);
+    return n;
+  }
+
+  // 예정 시각이 된 딜러 출근 — 출근 체크(QR·디렉터)를 한 딜러만 (체크 없이 자동 출근을 켜 두면 모두).
+  // 체크 안 한 딜러는 그대로 출근 예정 → 알림에 [출근]. 늦게 체크하면 체크한 때 바로 출근
+  // assumeAfter: 미리보기용 — 이 시각 뒤 예정인 딜러는 아직 체크 전이어도 제시간에 온다고 보고 넣는다
+  const isDue = (s, d, now, assumeAfter) => d.status === 'planned' && d.planAt != null && d.planAt <= now &&
+    (d.checkAt != null || s.settings.autoArrive === true || (assumeAfter != null && d.planAt > assumeAfter));
+  function arriveDue(s, now, assumeAfter) {
+    const due = s.dealers.filter(d => isDue(s, d, now, assumeAfter));
+    return due.length ? arrive(s, due.map(d => d.id), now, true) : s;
+  }
+
+  // 출근 체크 (휴대폰 출근 QR 또는 디렉터의 [출근]): 예정 시각 전이면 체크만 해 두고 예정 시각에 투입, 아니면 지금 출근
+  function checkInDealer(s, dealerId, at, now) {
+    const d0 = dealerOf(s, dealerId);
+    if (!d0 || d0.status !== 'planned') return s;
+    if (d0.planAt == null || d0.planAt <= now) {
+      const n = arrive(s, [dealerId], now);
+      n.log[0].msg = `${d0.name} 출근 체크 — 출근`;
+      return n;
+    }
+    if (d0.checkAt != null) return s;
+    const n = draft(s);
+    dealerOf(n, dealerId).checkAt = at;
+    addLog(n, now, 'dealer', `${d0.name} 출근 체크 (${clock(at)}) — ${clock(d0.planAt)}부터 투입`);
+    return n;
+  }
+
+  // 휴대폰에서 온 출근 체크 반영. inbox = {딜러id: {c, at}} — 출근 예정인 딜러의, 아직 반영 안 한 것(at)만
+  function applyCheckIns(s, inbox, now) {
+    let n = s;
+    const done = [];
+    for (const id of Object.keys(inbox || {})) {
+      const m = inbox[id];
+      const d = dealerOf(n, id);
+      if (!d || d.status !== 'planned' || !m || typeof m.at !== 'number' || m.at === d.ciAt) continue;
+      const at = Math.min(m.at, now);
+      const next = checkInDealer(n, id, at, now);
+      n = next === n ? draft(n) : next;
+      dealerOf(n, id).ciAt = m.at;
+      const a = dealerOf(n, id);
+      done.push({ id, name: a.name, waitUntil: a.status === 'planned' ? a.planAt : null });
+    }
+    return { state: n, done };
+  }
+
+  // 출근 예정 시각 정하기·바꾸기 (null = 시각 없이 '출근 전'). 퇴근한 딜러도 다시 출근 예정으로
+  function setPlanAt(s, dealerId, at, now) {
+    const d0 = dealerOf(s, dealerId);
+    if (!d0 || (d0.status !== 'planned' && d0.status !== 'off')) return s;
+    const when = Number.isFinite(at) ? at : null;
+    if (d0.status === 'planned' && d0.planAt === when) return s;
+    const n = draft(s);
+    const d = dealerOf(n, dealerId);
+    Object.assign(d, { status: 'planned', planAt: when, since: now, hold: false, eoAsk: null, eoStay: false, earlyOut: false });
+    if (d0.status === 'off') d.checkAt = null;
+    addLog(n, now, 'dealer', when == null ? `${d.name} 출근 예정 시각 지움 (출근 전)` : `${d.name} 출근 예정 ${clock(when)}`);
+    return n;
+  }
+
+  // 출근 예정 취소: 한 번도 출근 안 했으면 명단에서 지우고, 출근 기록이 있으면 퇴근 상태로
+  function removePlanned(s, dealerId, now) {
+    const d0 = dealerOf(s, dealerId);
+    if (!d0 || d0.status !== 'planned') return s;
+    const n = draft(s);
+    if (!d0.sessions.length) n.dealers = n.dealers.filter(d => d.id !== dealerId);
+    else Object.assign(dealerOf(n, dealerId), { status: 'off', planAt: null });
+    addLog(n, now, 'dealer', `${d0.name} 출근 예정 취소`);
+    return n;
+  }
+
+  // 출근 시간 변경: 출근 처리됐지만(자동 출근 등) 실제로는 늦게 오는 딜러 → 바꾼 시각에 출근하는 것으로 되돌린다.
+  // 실제로 일한 기록을 지우지 않게: 출근 뒤 테이블·다른 업무를 한 적 없이 쉬는 중이거나,
+  // 막 들어간 자리(그 교대 구간 안, '미투입'이 되는 때)에 앉아 있을 때만
+  function canDelay(s, dealerId, now) {
+    const d = dealerOf(s, dealerId);
+    if (!d || !d.inBase || d.totalWorkMs !== d.inBase.w || (d.totalDutyMs || 0) !== d.inBase.d) return false;
+    if (d.status === 'break') return true;
+    if (d.status !== 'working') return false;
+    const info = undoInfo(s, d.tableId, now);
+    return !!(info && info.dealer.id === d.id);
+  }
+
+  // 출근을 없던 일로 (출근 예정으로): 막 들어간 자리면 원래 딜러가 계속 앉은 것으로, 출근 기록에서 빠진다
+  function unArrive(s, dealerId, now) {
+    let m = s;
+    const d0 = dealerOf(s, dealerId);
+    // 교대로 막 들어간 자리면 '미투입'과 같이: 원래 딜러가 계속 앉아 있던 것으로
+    if (d0.status === 'working') {
+      const info = undoInfo(s, d0.tableId, now);
+      if (info && info.dealer.id === d0.id) m = undoSeat(s, d0.tableId, now, {});
+    }
+    const n = draft(m);
+    const d = dealerOf(n, dealerId);
+    if (d.status === 'working') release(n, d, now);
+    const base = d.inBase;
+    d.sessions.pop();
+    Object.assign(d, {
+      status: 'planned', planAt: null, since: now, tableId: null, streakMs: 0, hold: false, holdMs: 0, holdAt: null,
+      totalWorkMs: base.w, totalRestMs: base.r, totalDutyMs: base.d, totalHoldMs: base.h || 0, inBase: null,
+      earlyOut: false, eoAsk: null, eoStay: false,
+      checkInAt: d.sessions.length ? d.sessions[0].in : null,
+      checkOutAt: d.sessions.length ? d.sessions[d.sessions.length - 1].out : null,
+    });
+    fillVacancies(n, now);
+    return n;
+  }
+
+  // 바꾼 시각(지금보다 뒤)에 출근 → 그 시각이 되면 자동 출근, 로테이션은 그 뒤 가장 가까운 교대부터
+  function delayArrival(s, dealerId, at, now) {
+    if (!Number.isFinite(at) || at <= now || !canDelay(s, dealerId, now)) return s;
+    const n = unArrive(s, dealerId, now);
+    const d = dealerOf(n, dealerId);
+    d.planAt = at;
+    d.checkAt = null;
+    addLog(n, now, 'dealer', `${d.name} 출근 시간 변경 → ${clock(at)} (출근 체크하면 그 시각부터 투입)`);
+    return n;
+  }
+
+  // ---------- 다른 업무 ----------
+  // 칩 정리·등록 도움 등. 테이블에는 없지만 근무로 센다 (로테에 들어간 것과 같게) —
+  // 업무 중인 시간은 휴식이 아니고(오래 쉰 순에 안 쌓임), 끝나면 테이블에서 막 나온 사람처럼 그때부터 쉰다
+
+  function startDuty(s, dealerId, task, now) {
+    const d0 = dealerOf(s, dealerId);
+    if (!d0 || !present(d0)) return s;
+    const what = String(task || '').trim().slice(0, 30) || '다른 업무';
+    if (d0.status === 'duty' && d0.task === what) return s;
+    const n = draft(s);
+    const d = dealerOf(n, dealerId);
+    if (d.status === 'duty') {
+      d.task = what;
+      addLog(n, now, 'manual', `[업무] ${d.name} — ${what}`);
+      return n;
+    }
+    const from = d.status === 'working' ? tableOf(n, d.tableId).no : 0;
+    if (d.status === 'working') release(n, d, now);
+    endBreak(n, d, now);
+    Object.assign(d, { status: 'duty', since: clockNow(n, now), task: what, hold: false, tableId: null });
+    addLog(n, now, 'manual', `[업무] ${d.name} — ${what}${from ? ` (${from}번에서 나옴)` : ''}`);
+    fillVacancies(n, now);
+    return n;
+  }
+
+  function endDuty(s, dealerId, now) {
+    const d0 = dealerOf(s, dealerId);
+    if (!d0 || d0.status !== 'duty') return s;
+    const n = draft(s);
+    const d = dealerOf(n, dealerId);
+    const mins = Math.round(workedMs(n, d, now) / MIN);
+    const what = d.task;
+    finishDuty(n, d, now);
+    addLog(n, now, 'manual', `[업무] ${d.name} ${what} 끝 — 휴식 (연속 ${mins}분)`);
+    fillVacancies(n, now);
+    return n;
+  }
+
+  // ---------- 오늘 버튼 ----------
+  // 1~9번 중 무작위 하나. r(0~1)은 밖에서 넣는다 (시험에서 정해 둘 수 있게)
+  function drawButton(s, now, r) {
+    const n = draft(s);
+    const no = 1 + Math.min(8, Math.floor((r == null ? Math.random() : r) * 9));
+    n.button = { no, at: now };
+    addLog(n, now, 'manual', `[버튼] 오늘 버튼 ${no}번${s.button ? ` (다시 뽑음 — 전에는 ${s.button.no}번)` : ''}`);
     return n;
   }
 
@@ -726,6 +1109,14 @@
     else if (base - t > 12 * 60 * MIN) t += 24 * 60 * MIN;
     return t;
   }
+  // 출근 예정 시각 'HH:MM' — 앞으로 올 시각 쪽으로 읽는다. 가장 가까운 날로만 읽으면 11시 반에 적은 '00:27'(오늘 밤)이
+  // 11시간 전 시각이 되어 바로 출근 처리됐다 (2026-10-24 검토). 3시간 넘게 지난 시각이면 다음 날로 본다
+  // (몇 시간 전 시각은 '그때 출근했다'는 뜻으로 그대로 — 늦게 적어 넣는 경우)
+  function planTime(now, text) {
+    const t = nearTime(now, text);
+    return t != null && t < now - 3 * 60 * MIN ? t + 24 * 60 * MIN : t;
+  }
+
 
   const clock = t => {
     const d = new Date(t);
@@ -773,8 +1164,12 @@
     const n = draft(s);
     const t = tableOf(n, tableId);
     const d = dealerOf(n, dealerId);
-    if (!t || t.status !== 'open' || !d || d.status === 'off' || d.tableId === t.id) return s;
+    if (!t || t.status !== 'open' || !d || !present(d) || d.tableId === t.id) return s;
+    finishDuty(n, d, now); // 다른 업무 중이었으면 끝내고 넣는다
     const cur = t.dealerId ? dealerOf(n, t.dealerId) : null;
+    const wasIdle = t.use === false;
+    t.use = true; // 대기 테이블에 딜러를 넣으면 사용으로
+    if (wasIdle) addLog(n, now, 'table', `${t.no}번 테이블 사용`);
     if (d.status === 'working') {
       const other = tableOf(n, d.tableId);
       release(n, d, now);
@@ -852,7 +1247,7 @@
   function fixSeat(s, tableId, dealerId, now) {
     const t0 = tableOf(s, tableId);
     const q0 = dealerOf(s, dealerId);
-    if (!t0 || t0.status !== 'open' || !t0.dealerId || !q0 || q0.status === 'off' || q0.id === t0.dealerId) return s;
+    if (!t0 || t0.status !== 'open' || !t0.dealerId || !q0 || !(q0.status === 'working' || q0.status === 'break') || q0.id === t0.dealerId) return s;
     const n = draft(s);
     const t = tableOf(n, tableId);
     const p = dealerOf(n, t.dealerId);
@@ -974,7 +1369,7 @@
   const onByName = (s, who) => s.dealers.find(d => d.name === who && d.status !== 'off') || null;
 
   // 화면용: 명단 + 지금 상태
-  //  state: 'in' 출근 중 · 'off' 왔다가 퇴근함 · 'none' 아직 안 옴
+  //  state: 'in' 출근 중 · 'plan' 출근 예정(아직 출근 전) · 'off' 왔다가 퇴근함 · 'none' 아직 안 옴
   function rosterView(s) {
     return s.roster.map(e => {
       const on = onByName(s, e.name);
@@ -983,18 +1378,21 @@
         name: e.name,
         grade: (d && d.grade) || e.grade,
         id: d ? d.id : null,
-        state: on ? 'in' : d ? 'off' : 'none',
+        state: on ? (on.status === 'planned' ? 'plan' : 'in') : d ? 'off' : 'none',
+        planAt: on && on.status === 'planned' ? on.planAt : null,
+        checked: !!(on && on.status === 'planned' && on.checkAt != null), // 출근 체크함 (예정 시각에 투입)
       };
     });
   }
 
   // 명단에서 체크/해제. 체크 = 출근(처음이면 새로, 왔다 간 사람이면 복귀) · 해제 = 퇴근
+  //  출근 예정인 사람은 체크 = 출근 체크 (휴대폰 체크와 같다 — 예정 시각 전이면 그 시각에 투입), 해제 = 출근 예정 취소
   function attend(s, name, now, want) {
     const who = cleanName(name);
     if (!who) return s;
     const on = onByName(s, who);
-    if (!want) return on ? sendHome(s, on.id, now) : s;
-    if (on) return s;
+    if (!want) return !on ? s : on.status === 'planned' ? removePlanned(s, on.id, now) : sendHome(s, on.id, now);
+    if (on) return on.status === 'planned' ? checkInDealer(s, on.id, now, now) : s;
     const back = s.dealers.find(d => d.name === who);
     if (back) return checkBack(s, back.id, now);
     const e = s.roster.find(x => x.name === who);
@@ -1056,7 +1454,7 @@
   function askEarlyOut(s, dealerId, now) {
     const n = draft(s);
     const d = dealerOf(n, dealerId);
-    if (!d || d.status === 'off') return s;
+    if (!d || !present(d)) return s;
     Object.assign(d, { eoAsk: `a${now.toString(36)}`, eoStay: false });
     addLog(n, now, 'dealer', `[퇴근 희망] ${d.name}에게 휴대폰으로 물어봄`);
     return n;
@@ -1081,7 +1479,7 @@
     for (const id of Object.keys(inbox || {})) {
       const m = inbox[id];
       const cur = dealerOf(s, id);
-      if (!cur || cur.status === 'off' || !m || typeof m.w !== 'boolean' || !m.k || m.at === cur.eoAt) continue;
+      if (!cur || !present(cur) || !m || typeof m.w !== 'boolean' || !m.k || m.at === cur.eoAt) continue;
       const asked = m.k === cur.eoAsk;
       if (!asked && m.k !== callId) continue;
       n = n || draft(s);
@@ -1101,15 +1499,40 @@
   const livingDealer = (s, id) => { const d = dealerOf(s, id); return d && d.status !== 'off' ? d : null; };
   const okN = n => Number.isFinite(n) && n >= 1 && n <= PLAN_MAX;
 
+  // 같은 교대에 같은 두 사람으로 이미 정해 둔 예약이 있나 (순서는 상관없이) — 다시 끌어다 놓으면 그 예약을 지운다.
+  // 거꾸로 다시 놓아 원래대로 돌리려는 것인데, 새 예약으로 받으면 판정이 어긋나 '건너뜀' 경고만 남았다 (2026-10-24 검토)
+  const samePair = (s, n, type, a, b) => (s.plans || []).some(p => p.n === n && p.type === type
+    && ((p.a === a && p.b === b) || (p.a === b && p.b === a)));
+  function dropPair(s, n, a, b, now, msg) {
+    const d = draft(s);
+    d.plans = dropPlans(d.plans, n, [a, b]);
+    addLog(d, now, 'manual', msg);
+    return d;
+  }
+
   // 같은 시각(n번째 교대)의 두 딜러 자리를 맞바꾼다 — 한쪽이 휴식이면 휴식이 넘어간다
   function planSwap(s, n, aId, bId, now) {
     if (!s.clock.running || !okN(n) || aId === bId) return s;
     const a = livingDealer(s, aId);
     const b = livingDealer(s, bId);
     if (!a || !b) return s;
+    if (samePair(s, n, 'swap', aId, bId)) return dropPair(s, n, aId, bId, now, `${n}번째 교대: ${a.name} ↔ ${b.name} 휴식 넘기기 취소 (원래대로)`);
     const d = draft(s);
     d.plans = dropPlans(d.plans, n, [aId, bId]).concat([{ n, type: 'swap', a: aId, b: bId }]).slice(-PLAN_MAX);
     addLog(d, now, 'manual', `${n}번째 교대: ${a.name} ↔ ${b.name} 자리 맞바꿈`);
+    return d;
+  }
+
+  // 같은 시각(n번째 교대)에 앉아 있을 두 딜러의 테이블을 맞바꾼다 (테이블 칸 ↔ 테이블 칸, 2026-10-24 사용자 요청)
+  function planTrade(s, n, aId, bId, now) {
+    if (!s.clock.running || !okN(n) || aId === bId) return s;
+    const a = livingDealer(s, aId);
+    const b = livingDealer(s, bId);
+    if (!a || !b) return s;
+    if (samePair(s, n, 'trade', aId, bId)) return dropPair(s, n, aId, bId, now, `${n}번째 교대: ${a.name} ↔ ${b.name} 테이블 맞바꿈 취소 (원래대로)`);
+    const d = draft(s);
+    d.plans = dropPlans(d.plans, n, [aId, bId]).concat([{ n, type: 'trade', a: aId, b: bId }]).slice(-PLAN_MAX);
+    addLog(d, now, 'manual', `${n}번째 교대: ${a.name} ↔ ${b.name} 테이블 맞바꿈`);
     return d;
   }
 
@@ -1178,6 +1601,9 @@
   function resetState(s, now) {
     const n = createState(s.settings);
     n.roster = rosterEntries(s.roster); // 명단은 남긴다 — 초기화 후 다시 체크해서 출근시키면 된다
+    // 딜러 번호(d1, d2…)는 이어서 쓴다 — 처음부터 다시 쓰면 방에 남은 예전 휴대폰 출근 체크(ci/d1…)가
+    // 같은 번호의 새 딜러에게 붙어 체크한 적 없는 사람이 출근 처리된다 (2026-10-24 검토)
+    n.seq = s.seq || 0;
     n.past = [{ at: now, label: '전체 초기화', full: draft(Object.assign({}, s, { past: [] })) }];
     return n;
   }
@@ -1283,7 +1709,7 @@
     const n = draft(s);
     const p = n.clock.pausedAt;
     n.clock.nextPushAt = gridAt(n.clock.nextPushAt + (now - p), now);
-    for (const d of working(n)) d.since = now - Math.max(0, p - d.since);
+    for (const d of n.dealers.filter(busy)) d.since = now - Math.max(0, p - d.since);
     n.clock.paused = false;
     n.clock.pausedAt = null;
     addLog(n, now, 'clock', `재개 (${Math.round((now - p) / MIN)}분 정지)`);
@@ -1299,11 +1725,32 @@
     const plan = planPush(s, at);
     const n = draft(s);
     const outs = {};
-    for (const m of plan.moves) {
-      if (m.fromDealerId) outs[m.tableId] = releaseKeep(n, dealerOf(n, m.fromDealerId), at);
+    // 줄 순번(turn)이 교대의 순서를 따르게: 나가는 사람은 나갈 순서대로, 들어오는 사람은 들어갈 순서대로 부른다
+    // (표의 테이블 번호 순으로 부르면 다음 교대의 동점이 다시 테이블 번호로 풀린다)
+    const outRank = new Map(plan.toBreak.map((id, i) => [id, i]));
+    const inRank = new Map(breakPool(s, at).map((d, i) => [d.id, i]));
+    const rank = (m, id) => (m.has(id) ? m.get(id) : Infinity);
+    // 테이블 맞바꿈(디렉터가 표에서 직접 정함)으로 앉은 채 다른 테이블로 가는 사람 — 쉬러 가는 게 아니라 테이블만 바꾼다.
+    // 앉은 시간·줄 순번·연속 근무를 그대로 둔다 (다시 앉은 것으로 치면 나갈 차례를 놓쳐 그만큼 더 일한다 — 2026-10-24 검토)
+    const before = snapshot(s);
+    const movers = new Set(plan.moves.filter(m => m.toDealerId && before[m.toDealerId] > 0).map(m => m.toDealerId));
+    const leaving = plan.moves.filter(m => m.fromDealerId && !movers.has(m.fromDealerId))
+      .sort((a, b) => rank(outRank, a.fromDealerId) - rank(outRank, b.fromDealerId));
+    for (const m of leaving) outs[m.tableId] = releaseKeep(n, dealerOf(n, m.fromDealerId), at);
+    const coming = plan.moves.filter(m => m.toDealerId).sort((a, b) => rank(inRank, a.toDealerId) - rank(inRank, b.toDealerId));
+    for (const m of coming) {
+      const d = dealerOf(n, m.toDealerId);
+      const t = tableOf(n, m.tableId);
+      if (movers.has(d.id)) {
+        d.tableId = t.id;
+        t.dealerId = d.id;
+      } else {
+        seat(n, d, t, at, outs[m.tableId]);
+      }
     }
+    // 맞바꿈에 낀 테이블은 '미투입'으로 되돌리지 않는다 (되돌리면 한 사람이 두 테이블에 앉게 된다 — assignDealer의 자리 교환과 같다)
     for (const m of plan.moves) {
-      if (m.toDealerId) seat(n, dealerOf(n, m.toDealerId), tableOf(n, m.tableId), at, outs[m.tableId]);
+      if (movers.has(m.toDealerId) || movers.has(m.fromDealerId)) delete tableOf(n, m.tableId).undo;
     }
 
     const c = n.clock;
@@ -1331,8 +1778,24 @@
     const hasRested = s.dealers.some(d => isRested(s, d, now));
 
     // 공석은 테이블마다 한 줄이 아니라 한 줄로 (테이블을 많이 열면 알림이 화면을 밀어내지 않게)
-    const vacant = activeTables(s).filter(t => !t.dealerId).map(t => t.no);
+    const vacant = usedTables(s).filter(t => !t.dealerId).map(t => t.no);
     if (vacant.length) out.push({ level: 'danger', text: `공석 ${rangeText(vacant)}번 — 딜러 필요`, actions: [] });
+    const due = s.dealers.filter(d => d.status === 'planned' && d.planAt != null && d.planAt <= now && d.checkAt == null);
+    if (due.length) {
+      out.push({
+        level: 'warn',
+        text: `출근 체크 안 함 — ${due.map(d => `${d.name}(${clock(d.planAt)})`).join(', ')}`,
+        actions: due.map(d => ({ type: 'arrive', id: d.id, label: `${d.name} 출근` })),
+      });
+    }
+    const idle = idleTables(s).map(t => t.no);
+    if (idle.length) {
+      out.push({
+        level: 'info',
+        text: `대기 ${rangeText(idle)}번 — 딜러 없음`, // 칸에서 [사용]을 체크하면 투입
+        actions: [{ type: 'use-all', id: '', label: idle.length > 1 ? '모두 사용' : '사용' }],
+      });
+    }
     for (const d of working(s)) {
       const w = workedMs(s, d, now);
       if (w < maxMs) continue;
@@ -1343,8 +1806,8 @@
         actions: hasRested ? [{ type: 'relieve', id: t.id, label: '지금 교체' }] : [],
       });
     }
-    if (st.tables && st.active < st.tables) {
-      out.push({ level: 'danger', text: `딜러 ${st.tables - st.active}명 부족 — 추가 호출 필요`, actions: [] });
+    if (st.tables && st.available < st.tables) {
+      out.push({ level: 'danger', text: `딜러 ${st.tables - st.available}명 부족 — 추가 호출 필요${st.onTask ? ` (다른 업무 ${st.onTask}명)` : ''}${st.planned ? ` (출근 예정 ${st.planned}명)` : ''}`, actions: [] });
     } else if (st.limited && st.tables && st.diff < 0) {
       out.push({ level: 'warn', text: `권장 인원(${st.recommended}명)보다 ${-st.diff}명 적음 — 연장 근무 발생 가능`, actions: [] });
     } else if (st.limited && st.tables && st.diff > 0) {
@@ -1373,6 +1836,8 @@
     createState,
     migrate,
     activeTables,
+    usedTables,
+    idleTables,
     breakPool,
     working,
     dealerOf,
@@ -1388,9 +1853,12 @@
     clockNow,
     staffing,
     snapshot,
+    DUTY,
+    canDelay,
     planPush,
     project,
     planSwap,
+    planTrade,
     planMoveRest,
     clearPlans,
     plannedIds,
@@ -1400,6 +1868,7 @@
     openTable,
     parseNos,
     rangeText,
+    setTableUse,
     closeTable,
     relieveTable,
     sendHome,
@@ -1410,7 +1879,18 @@
     removeRoster,
     rosterView,
     attend,
+    arrive,
+    arriveDue,
+    checkInDealer,
+    applyCheckIns,
+    setPlanAt,
+    removePlanned,
+    delayArrival,
+    startDuty,
+    endDuty,
+    drawButton,
     nearTime,
+    planTime,
     editSessions,
     assignDealer,
     undoInfo,

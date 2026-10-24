@@ -8,21 +8,23 @@
  *   rooms/{방}/pulse       {v: 마지막으로 바뀐 시각(ms), at} — TV가 15초마다 확인해서 v가 바뀌면 sheet를 받는다
  *
  * 시각: at = 디렉터 PC 시각(초). 다른 시각은 모두 at에서 몇 초 뒤(앞)인지로 (13자리 대신 몇 자리)
- * 자리: 테이블 번호, 0 = 휴식, -1 = 그때는 없음(퇴근·아직 출근 전)
+ * 자리: 테이블 번호, 0 = 휴식, -2 = 다른 업무, -1 = 그때는 없음(퇴근·아직 출근 전)
  * 0·빈 값은 보내지 않는다 (받는 쪽 norm*이 기본값을 채움)
  *
  * p/{딜러id}: 딜러가 보는 건 "지금 어디, 다음에 어디" 뿐이다 (2026-10-11 사용자 요청).
  *   일한 시간·쉰 시간·다른 사람 로테이션은 화면에 없을 뿐 아니라 아예 보내지 않는다.
  *   n 이름 · t 이벤트 이름 · at
- *   c 1 진행 중 / 2 일시정지 (없으면 시작 전) · w 교대 몇 분 전 알림 · nt 공지 [[초, 글]] (최근 3개)
+ *   c 1 진행 중 / 2 일시정지 (없으면 시작 전) · w 교대 몇 분 전 알림 · nt 공지 [[초, 글]] (최근 3개) · bt 오늘 버튼 번호
  *   x 지금 자리 · ts 앞으로 가야 할 교대 시각 [초] · y 그때 내 자리 [ts와 같은 순서]
  *     (ts·y는 자리가 처음 바뀌는 한 번만 — 그 뒤 예정은 보내지 않는다. 안 바뀌면 둘 다 빈 배열)
  *   h 1 = 투입 보류
  *   k 지금 답할 수 있는 퇴근 희망 질문 id (나에게 온 묻기 → 모두에게 받기 순) · q 1 = 그게 나에게 온 묻기
  *   e 1 = 퇴근 희망 접수됨 · ea 디렉터가 반영한 내 답의 서버 시각(ms)
+ *   pl 1 = 아직 출근 전 · pa 출근 예정 시각(초, 정해 둔 경우) · ci 1 = 출근 체크함(예정 시각에 투입) · tk 다른 업무 내용
+ *   (보안 규칙은 p/{딜러id}/pl로 '이 딜러가 지금 출근 체크할 수 있나'를 확인한다)
  *   (보안 규칙도 p/{딜러id}/k로 '이 딜러가 지금 답할 수 있나'를 확인한다)
  * sheet:
- *   t · at · c · n 다음 교대까지 초(일시정지면 남은 시간) · w · nt
+ *   t · at · c · n 다음 교대까지 초(일시정지면 남은 시간) · w · nt · bt
  *   pc 지난 교대 시각 [초] · nc 지금 배치의 시각(초, 없으면 생략) · ts 예정 시각 [초]
  *   r 줄 [[딜러id, 이름, 등급, [자리 — 지난 것들, 지금, 예정들]]]
  * 휴대폰은 시간이 흐르면 바뀌는 값을 더 받지 않는다 — 남은 시간은 교대 시각(ts)에서 직접 센다.
@@ -52,18 +54,19 @@
     const c = s.clock;
     const at = sec(now);
     const rel = t => sec(t) - at; // 디렉터 시각(ms) → at에서 몇 초
-    const slots = E.project(s, FUTURE);
+    const slots = E.project(s, FUTURE, now);
     const snap = E.snapshot(s);
-    const on = s.dealers.filter(x => x.status !== 'off');
+    const on = s.dealers.filter(x => x.status !== 'off'); // 출근 예정(출근 전)도 — 자기 이름을 미리 골라 둘 수 있게
     const cn = E.clockNow(s, now);
     const clock = c.running ? (c.paused ? 2 : 1) : 0;
     const ts = slots.map(p => rel(p.at));
     const nt = s.notices.slice(0, 3).map(n => [rel(n.at), n.text]);
     const callId = s.eoCall && s.eoCall.open ? s.eoCall.id : '';
-    const head = { t: title || '', at, c: clock, w: s.settings.warnBeforeMinutes, nt };
+    const head = { t: title || '', at, c: clock, w: s.settings.warnBeforeMinutes, nt, bt: s.button ? s.button.no : 0 };
 
     const p = {};
     for (const x of on) {
+      const away = x.status === 'planned';
       // 딜러에게는 '지금 자리'와 '앞으로 가야 할 자리' 한 번만 보낸다 (사용자 요청)
       const mine = place(snap[x.id]);
       const chg = slots.find(q => place(q.a[x.id]) !== mine);
@@ -72,10 +75,14 @@
         ts: chg ? [rel(chg.at)] : [],
         y: chg ? [place(chg.a[x.id])] : [],
         h: x.hold ? 1 : 0,
-        k: x.eoAsk || callId,
+        k: away ? '' : x.eoAsk || callId,
         q: x.eoAsk ? 1 : 0,
         e: x.earlyOut ? 1 : 0,
         ea: x.eoAt || 0,
+        pl: away ? 1 : 0,
+        pa: away && x.planAt != null ? rel(x.planAt) : null,
+        ci: away && x.checkAt != null ? 1 : 0,
+        tk: x.status === 'duty' ? x.task : '',
       }));
     }
 
@@ -90,6 +97,7 @@
       n: c.running && c.nextPushAt != null ? sec(c.nextPushAt - cn) : 0,
       w: head.w,
       nt,
+      bt: head.bt,
       pc: past.map(h => rel(h.at)),
       nc: cur ? rel(cur.at) : null,
       ts,
@@ -110,7 +118,7 @@
   // 파이어베이스는 빈 배열 등을 저장하지 않고, 0·빈 값은 애초에 안 보냈다 → 기본값
   function normMe(m) {
     if (!m) return null;
-    return Object.assign({ n: '', t: '', at: 0, c: 0, w: 0, x: 0, h: 0, k: '', q: 0, e: 0, ea: 0 }, m,
+    return Object.assign({ n: '', t: '', at: 0, c: 0, w: 0, x: 0, h: 0, k: '', q: 0, e: 0, ea: 0, pl: 0, pa: null, ci: 0, tk: '', bt: 0 }, m,
       { nt: m.nt || [], ts: m.ts || [], y: m.y || [] });
   }
   function normNames(n) {
@@ -119,7 +127,7 @@
   }
   function normSheet(sh) {
     if (!sh) return null;
-    return Object.assign({ t: '', at: 0, c: 0, n: 0, w: 0, nc: null }, sh, {
+    return Object.assign({ t: '', at: 0, c: 0, n: 0, w: 0, nc: null, bt: 0 }, sh, {
       nt: sh.nt || [],
       pc: sh.pc || [],
       ts: sh.ts || [],

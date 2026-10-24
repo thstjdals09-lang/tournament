@@ -13,6 +13,7 @@
   const embedded = (() => { try { return window.parent !== window; } catch (e) { return false; } })();
   if (embedded) document.documentElement.classList.add('embedded');
   const isBoard = VIEW === 'board'; // 딜러룸 TV
+  const SHOW_TV = false; // TV용(보드 화면)은 당분간 숨김 — 버튼·링크만 감추고 기능(?view=board)은 그대로 (사용자 요청 2026-10-18)
   const isMe = VIEW === 'me';       // 딜러 휴대폰
   const ME_KEY = 'dealer-director:me';
   const PUBLIC_URL = 'https://dealer-director.web.app/'; // 배포 주소 (Firebase Hosting)
@@ -115,6 +116,8 @@
   let assignTableId = null;
   let meWarnedFor = null;
   let meEoSeen = null;
+  let inboxKey = null;      // 휴대폰 답·출근 체크 받는 함을 연 방 (안 열었으면 null) — syncInbox
+  let guestRoomChecked = false; // 같이 쓰기에 들어온 이벤트: 주인의 딜러 QR 방을 이번에 받아 왔나
 
   // label이 있으면 되돌리기 목록에 쌓는다 (디렉터 작업). 교대·퇴근 희망 표시 등은 label 없이
   function commit(next, label) {
@@ -225,7 +228,10 @@
     blocked = reason;
     clearTimeout(publishTimer);
     if (stopInbox) stopInbox();
+    if (stopCiInbox) stopCiInbox();
     stopInbox = null;
+    stopCiInbox = null;
+    inboxKey = null;
     renderGate();
   }
 
@@ -414,11 +420,13 @@
     store.setItem(EV.stateKey(id), raw);
     const p = { sharedRev: Number(node.head && node.head.rev) || 0, rev: 1, cloudRev: 1 };
     if (node.name) p.name = String(node.name);
+    if (ev.guest && node.room && node.room !== ev.room) p.room = String(node.room); // 들어온 계정은 주인의 딜러 QR 방을 같이 쓴다
     const cur = EV.update(store, id, p);
     shareRun = (node.head && node.head.run) || null;
     if (event && event.id === id) {
       if (cur) event = cur;
       try { state = E.migrate(JSON.parse(raw)); } catch (err) { /* 못 읽으면 그대로 둔다 */ }
+      takeCheckIns(true); // 받아 온 내용에 아직 없는 휴대폰 출근 체크는 다시 반영
       render();
     }
     if (clash) toast('같이 쓰는 분이 먼저 바꿔서 방금 작업은 취소됐습니다 — 화면을 보고 다시 해 주세요');
@@ -437,6 +445,12 @@
       shareGone = false;
       shareRun = head.run || null;
       shareError = '';
+      // 들어온 계정: 주인의 딜러 QR 방을 한 번 받아 온다 (예전에 참가했거나 예전 버전이 따로 만든 방을 쓰고 있을 수 있다)
+      if (event.guest && !guestRoomChecked) {
+        guestRoomChecked = true;
+        const r = await S.get(FB.databaseURL, `shared/${code}/room`, await syncIdToken()).catch(() => null);
+        if (r && String(r) !== event.room) event = EV.update(store, event.id, { room: String(r), shareOff: false }) || event;
+      }
       if (Number(head.rev) !== (event.sharedRev || 0) && !AC.dirty(event)) await pullShared(event.id, false);
       // 교대 시계 주인: 비었거나 소식이 끊기면 가져오고, 내가 주인이면 살아 있다고 알린다
       if (!shareRun || now - (shareRun.at || 0) > RUN_STALE_MS) await claimRun(now);
@@ -567,6 +581,7 @@
       await S.put(FB.databaseURL, `rooms/${id}/owner`, auth.uid, t);
       event = EV.update(store, event.id, { room: id, shareOff: false }) || event;
       markChanged(event.id);
+      if (event.share && !event.guest) await linkShareRoom(event);
       await publish(false);
       startInbox();
       if (syncStatus === 'live') toast(`실시간 공유 연결됨 — '${event.name}' 딜러용 링크(QR)를 보내세요`);
@@ -576,8 +591,22 @@
     if ($('dlgShare').open) renderShare();
   }
 
+  // 같이 쓰는 이벤트의 딜러 QR 방을 같이 쓰기에 이어 둔다 (주인만):
+  //  roomShare/{방} = 코드 → 들어온 계정도 이 방에 올릴 수 있고, shared/{코드}/room = 방 → 들어온 계정이 새 방을 만들지 않는다.
+  //  예전에는 코드를 rooms/{방}/share(링크만 있으면 누구나 읽음)에 적었다 → 지운다 (2026-10-24 검토)
+  async function linkShareRoom(ev) {
+    if (!ev || !ev.share || ev.guest || !ev.room || !auth) return;
+    try {
+      const t = await syncIdToken();
+      await S.put(FB.databaseURL, `roomShare/${ev.room}`, ev.share, t);
+      await S.put(FB.databaseURL, `shared/${ev.share}/room`, ev.room, t);
+      await S.put(FB.databaseURL, `rooms/${ev.room}/share`, null, t).catch(() => {});
+    } catch (e) { /* 다음에 열 때 다시 */ }
+  }
+
   // 이 이벤트만 공유를 끊는다 (다른 이벤트의 방은 그대로)
   function disconnectSync() {
+    if (event.guest) return; // 같이 쓰는 방은 주인 것 — 들어온 계정이 끊지 않는다
     const r = room();
     if (r && hasAccount()) clearRoom(r);
     event = EV.update(store, event.id, { room: null, shareOff: true }) || event;
@@ -590,7 +619,7 @@
   // 방에 남은 내용은 비워 둔다 (실패해도 무시 — 링크를 모르면 아무도 못 봄)
   function clearRoom(r) {
     syncIdToken()
-      .then(t => S.patch(FB.databaseURL, `rooms/${r}`, { p: null, names: null, sheet: null, pulse: null, eo: null, state: null, view: null, beat: null }, t))
+      .then(t => S.patch(FB.databaseURL, `rooms/${r}`, { p: null, names: null, sheet: null, pulse: null, eo: null, ci: null, state: null, view: null, beat: null }, t))
       .catch(() => {});
   }
 
@@ -598,15 +627,47 @@
   let eoInbox = null;
   let stopInbox = null;
 
+  // 휴대폰 출근 체크 (rooms/{방}/ci) — 연결을 하나 더 연다 (디렉터 PC만)
+  let ciInbox = null;
+  let stopCiInbox = null;
+
+  // 받는 함을 연 조건(방 id, 이 PC가 올리는 쪽일 때만 — inboxKey). 같이 쓰기에서는 처음 열 때 아직 시계 주인이 안 정해져 있다가
+  // 나중에 이 PC가 가져가므로, 1초 박자마다 견줘서 바뀌면 다시 연다 (안 그러면 아무 PC도 휴대폰 답을 못 받는다 — 2026-10-24 검토)
+  function syncInbox() {
+    const key = !blocked && isPublisher() ? room() : null;
+    if (key === inboxKey) return;
+    startInbox();
+    if (key) publish(false); // 이제 이 PC가 올린다 — 딜러 휴대폰·TV를 바로 지금 모습으로
+  }
+
   function startInbox() {
     if (stopInbox) stopInbox();
+    if (stopCiInbox) stopCiInbox();
     stopInbox = null;
+    stopCiInbox = null;
     eoInbox = null;
-    if (!isPublisher()) return;
+    ciInbox = null;
+    inboxKey = !blocked && isPublisher() ? room() : null;
+    if (!inboxKey) return;
     stopInbox = S.subscribe(FB.databaseURL, room(), data => {
       eoInbox = data;
       takeReplies();
     }, () => {}, 'eo');
+    stopCiInbox = S.subscribe(FB.databaseURL, room(), data => {
+      ciInbox = data;
+      takeCheckIns();
+    }, () => {}, 'ci');
+  }
+
+  // 일찍 체크한 딜러는 예정 시각에, 늦게 체크한 딜러는 바로 출근 (엔진 applyCheckIns)
+  function takeCheckIns(quiet) {
+    if (!ciInbox) return;
+    const res = E.applyCheckIns(state, ciInbox, Date.now());
+    if (!res.done.length) return;
+    commit(res.state);
+    if (state !== res.state || quiet) return; // 막힌 화면이라 반영 안 됐으면 알리지 않는다
+    chime(1);
+    toast(`휴대폰 출근 체크 · ${res.done.map(x => (x.waitUntil ? `${x.name} (${hhmm(x.waitUntil)}부터 투입)` : `${x.name} 출근`)).join(' · ')}`);
   }
 
   function takeReplies() {
@@ -734,6 +795,7 @@
     in: ['휴식 복귀', 'in'],
     'short-rest': ['휴식 부족', 'warn'],
     vacant: ['공석', 'danger'],
+    trade: ['테이블 맞바꿈', 'info'], // 표에서 직접 정한 것 — 앉아 있던 딜러가 다른 테이블로
   };
 
   // 바뀐 부분만 다시 그린다 — 매초 innerHTML을 갈아끼우면 버튼 클릭이 씹힌다
@@ -748,7 +810,10 @@
   // 앞으로의 교대 예측 — state가 바뀔 때만 다시 계산
   let projCache = { state: null, slots: [] };
   function projection() {
-    if (projCache.state !== state) projCache = { state, slots: E.project(state, FUTURE_COLS) };
+    const now = Date.now();
+    // 예정 시각이 지났는데 체크 안 한 딜러가 생기면 미리보기에서 빠지므로 그때도 다시 계산
+    const late = state.dealers.filter(d => d.status === 'planned' && d.planAt != null && d.planAt <= now && d.checkAt == null).length;
+    if (projCache.state !== state || projCache.late !== late) projCache = { state, late, slots: E.project(state, FUTURE_COLS, now) };
     return projCache.slots;
   }
   const nextPlan = () => (projection()[0] || {}).plan || null;
@@ -767,8 +832,10 @@
 
   // meId가 있으면 그 딜러 줄을 맨 위로 올리고 강조 (딜러 휴대폰 화면). list: [{id, name, grade}] (없으면 이 PC의 상태)
   // edit = 디렉터 화면 — 예정 칸에 '몇 번째 교대·누구'를 달아 휴식을 끌어다 놓을 수 있게 한다
+  // 출근 예정(출근 전)도 아래쪽에 — 예정 시각 뒤 가장 가까운 교대부터 자리가 보인다
   function dealerRows(cols, meId, list, edit) {
-    const dealers = (list || state.dealers.filter(d => d.status !== 'off')).slice()
+    const dealers = (list || state.dealers.filter(d => d.status !== 'off')
+      .sort((a, b) => (a.status === 'planned') - (b.status === 'planned'))).slice()
       .sort((a, b) => (b.id === meId) - (a.id === meId));
     if (!dealers.length) return `<tr><td class="empty-row" colspan="${cols.length + 1}">출근한 딜러가 없습니다</td></tr>`;
     let k = 0;
@@ -782,6 +849,7 @@
         const chg = prev !== undefined && v !== undefined && v !== prev ? ' chg' : '';
         prev = v;
         if (v === undefined) return `<td class="${c.cls} na"></td>`;
+        if (v === E.DUTY) return `<td class="${c.cls} duty${chg}" title="다른 업무 중 — 끌어다 놓을 수 없음">업무</td>`;
         const n = edit ? ns[i] : null;
         const fix = n && fixed[i].has(d.id) ? ' fixed' : '';
         const tag = n == null ? '' : ` data-n="${n}" data-d="${d.id}"`;
@@ -789,16 +857,17 @@
         if (v === 0) return `<td class="${c.cls} rest${chg}${fix}"${tag}${grab}>휴식</td>`;
         return `<td class="${c.cls} tb${chg}${fix}"${tag}${grab} style="--h:${hue(v)}">${v}</td>`;
       }).join('');
-      return `<tr class="${d.id === meId ? 'mine' : ''}"><th class="rowhead">${esc(d.name)} <span class="grade">${esc(d.grade)}</span></th>${cells}</tr>`;
+      const plan = d.status === 'planned' ? `<small class="plan-at">${d.planAt == null ? '출근 전' : `${hhmm(d.planAt)} 출근 예정`}</small>` : '';
+      return `<tr class="${d.id === meId ? 'mine' : ''}"><th class="rowhead">${esc(d.name)} <span class="grade">${esc(d.grade)}</span>${plan}</th>${cells}</tr>`;
     }).join('');
   }
 
   function tableRows(cols) {
-    const tables = E.activeTables(state);
-    if (!tables.length) return `<tr><td class="empty-row" colspan="${cols.length + 1}">오픈된 테이블이 없습니다</td></tr>`;
+    const tables = E.usedTables(state); // 대기 테이블은 표에 넣지 않음 (딜러가 없으므로)
+    if (!tables.length) return `<tr><td class="empty-row" colspan="${cols.length + 1}">사용 중인 테이블이 없습니다</td></tr>`;
     const byTable = cols.map(c => {
       const m = {};
-      for (const id in c.a) if (c.a[id]) m[c.a[id]] = id;
+      for (const id in c.a) if (c.a[id] > 0) m[c.a[id]] = id;
       return m;
     });
     return tables.map(t => {
@@ -905,7 +974,7 @@
     const lic = AC.license({ until: auth && auth.until }, Date.now());
     if (lic.state === 'ok' && lic.daysLeft <= 3) warn.push(`이용 기간이 ${lic.daysLeft}일 남았습니다 (${AC.dateStr(lic.until)}까지) — 연장은 판매자에게 문의하세요`);
     if (Date.now() - otherDirectorAt < 12000) {
-      warn.push('이 이벤트가 이 PC의 창 두 개에 열려 있습니다 — 하나는 닫아 주세요 (교대·음성 안내가 두 번 될 수 있음). 딜러룸 TV는 \'보드 화면\' 버튼으로');
+      warn.push('이 이벤트가 이 PC의 창 두 개에 열려 있습니다 — 하나는 닫아 주세요 (교대·음성 안내가 두 번 될 수 있음)');
     }
     const stall = stalled
       ? `<p class="conn bad big-warn">디렉터 PC가 ${minutes(stalled.ms)}분 동안 멈춰 있었습니다 (절전·화면 꺼짐·노트북 덮개 닫음) — 그동안 자동 교대·음성 안내·딜러 휴대폰 갱신이 멈췄습니다. 테이블과 교대 시각을 확인하세요 <button type="button" class="mini" data-act="stall-ok">확인</button></p>`
@@ -944,13 +1013,20 @@
   // 한 줄 요약 (예전의 숫자 카드 6개)
   function renderStats() {
     const st = E.staffing(state);
-    const cls = st.active < st.tables ? 'danger' : st.diff < 0 ? 'warn' : 'ok';
+    const cls = st.available < st.tables ? 'danger' : st.diff < 0 ? 'warn' : 'ok';
     const item = (label, value, extra, title) =>
       `<span class="${extra || ''}"${title ? ` title="${esc(title)}"` : ''}>${esc(label)} <b>${esc(value)}</b></span>`;
+    const btn = state.button
+      ? `<button type="button" class="btn-today" data-act="button-draw" title="오늘 버튼 — 1~9번 중 무작위로 뽑았습니다 (딜러 휴대폰에도 보임). 눌러서 다시 뽑기">버튼 <b>${state.button.no}번</b></button>`
+      : '';
     setHTML($('stats'), [
-      item('테이블', st.tables),
+      btn,
+      item('테이블', st.tables, '', st.idle ? '사용 중인 테이블 (대기 제외)' : ''),
+      st.idle ? item('대기', st.idle, 'idle', '열려 있지만 딜러를 넣지 않은 테이블 — 칸에서 [사용]을 체크하면 투입') : '',
       item('근무', st.working),
       item('휴식', st.onBreak),
+      st.onTask ? item('업무', st.onTask, 'duty', '다른 업무 중 — 테이블에는 없지만 근무로 계산') : '',
+      st.planned ? item('출근 예정', st.planned, 'idle', '아직 출근 전') : '',
       st.limited
         ? item('권장', st.recommended, '', `최대 ${state.settings.maxWorkMinutes}분 근무 기준 권장 인원`)
         : item('필요', st.recommended, '', '최대 근무 제한 없음 — 테이블 수만큼 있으면 되고, 남는 만큼 교대'),
@@ -965,7 +1041,7 @@
     setHTML($('alerts'), html);
   }
 
-  // 테이블 칸: 번호·딜러·연속 근무·다음 교대에 들어올 사람. 칸을 누르면 메뉴(지정·교체·바로잡기·고정), 자주 쓰는 [깨기]만 칸에
+  // 테이블 칸: 번호·딜러·연속 근무·다음 교대에 들어올 사람. 칸을 누르면 메뉴(지정·교체·바로잡기·고정), [사용] 체크와 자주 쓰는 [깨기]는 칸에
   function renderTables(now) {
     const limited = E.hasWorkLimit(state);
     const maxMs = E.maxWorkMs(state);
@@ -975,6 +1051,7 @@
     // 제한이 없으면 막대는 '지금 가장 오래 일한 사람' 기준 (꽉 찬 막대 = 다음 휴식 후보)
     const scale = limited ? maxMs : Math.max(E.MIN, ...E.working(state).map(workedOf));
     const html = E.activeTables(state).map(t => {
+      if (t.use === false) return idleCard(t);
       const d = t.dealerId ? E.dealerOf(state, t.dealerId) : null;
       const w = workedOf(d);
       const pct = Math.min(100, Math.round((w / scale) * 100));
@@ -984,7 +1061,7 @@
         .filter(Boolean).join(' ');
       const tags = [t.feature && '<em>피처</em>', t.locked && '<em class="lock">고정</em>'].filter(Boolean).join('');
       return `<div class="${cls}" data-table="${t.id}" role="button" tabindex="0" title="눌러서 지정·교체·바로잡기·고정">
-        <div class="tno">${tchip(t.no)}${tags}<button class="mini danger" data-act="close" data-id="${t.id}" title="${t.no}번 테이블 깨기">깨기</button></div>
+        <div class="tno">${tchip(t.no)}${tags}${useBox(t)}<button class="mini danger" data-act="close" data-id="${t.id}" title="${t.no}번 테이블 깨기">깨기</button></div>
         <div class="tdealer">${d ? `${esc(d.name)} <span class="grade">${esc(d.grade)}</span>${eoTags(d)}` : '공석 · 눌러서 넣기'}</div>
         <div class="tmeta">${d ? `${minutes(w)}분 근무${limited ? ` / ${state.settings.maxWorkMinutes}분` : ''}` : ''}</div>
         <div class="bar"><i style="width:${pct}%"></i></div>
@@ -993,6 +1070,45 @@
     }).join('');
     setHTML($('tables'), html || '<p class="empty">오픈된 테이블이 없습니다. 위에서 테이블 번호를 입력하세요.</p>');
   }
+
+  // [사용] 체크: 켜면 다음 순서 딜러 투입, 끄면 딜러는 휴식 (테이블은 열린 채 대기)
+  const useBox = t => `<label class="use-chk" title="${t.use === false
+    ? '체크하면 다음 순서 딜러가 바로 들어갑니다' : '끄면 딜러는 휴식으로 가고 테이블은 열린 채 대기합니다'}"><input type="checkbox" data-use="${t.id}"${t.use === false ? '' : ' checked'}> 사용</label>`;
+
+  // 대기 테이블: 열려 있지만 딜러를 넣지 않음
+  function idleCard(t) {
+    const tags = [t.feature && '<em>피처</em>', t.locked && '<em class="lock">고정</em>'].filter(Boolean).join('');
+    return `<div class="tcard idle${t.feature ? ' feature' : ''}" data-table="${t.id}" role="button" tabindex="0" title="눌러서 사용·딜러 지정·깨기">
+        <div class="tno">${tchip(t.no)}${tags}${useBox(t)}<button class="mini danger" data-act="close" data-id="${t.id}" title="${t.no}번 테이블 깨기">깨기</button></div>
+        <div class="tdealer">대기 · 딜러 없음</div>
+        <div class="tmeta">사용을 체크하면 투입</div>
+        <div class="bar"><i style="width:0%"></i></div>
+      </div>`;
+  }
+
+  // 사용 체크 바꾸기. 딜러가 앉아 있는 테이블을 끌 때만 한 번 묻는다 (되돌리기도 됨)
+  function setUse(ids, use) {
+    const list = ids.map(id => E.tableOf(state, id)).filter(t => t && t.status === 'open' && (t.use !== false) !== use);
+    if (!list.length) return false;
+    const what = `${E.rangeText(list.map(t => t.no))}번`;
+    const seated = list.filter(t => t.dealerId).map(t => `${t.no}번 ${nameOf(t.dealerId)}`);
+    if (!use && seated.length && !confirm(`${what} 테이블 사용을 끌까요?\n${seated.join(', ')}은(는) 휴식으로 가고, 테이블은 열린 채 대기합니다.`)) return false;
+    commit(E.setTableUse(state, list.map(t => t.id), use, Date.now()), `${what} ${use ? '사용' : '사용 안 함'}`);
+    toast(use ? `${what} 사용 — 딜러 투입` : `${what} 대기${seated.length ? ' — 딜러는 휴식' : ''}`, true);
+    return true;
+  }
+
+  document.addEventListener('change', e => {
+    const auto = e.target.closest && e.target.closest('input[data-auto-arrive]');
+    if (auto) {
+      commit(E.updateSettings(state, { autoArrive: auto.checked }, Date.now()));
+      toast(auto.checked ? '체크 없이 출근 — 예정 시각이 되면 출근 처리하고 다음 교대에 넣습니다' : '출근 체크해야 투입 — 딜러가 휴대폰에서 출근 체크하거나 명단의 [출근]');
+      return;
+    }
+    const box = e.target.closest && e.target.closest('input[data-use]');
+    if (!box) return;
+    if (!setUse([box.dataset.use], box.checked)) box.checked = !box.checked; // 취소하면 원래대로
+  });
 
   // 다음 교대: 딜러 이름이 왼쪽 (들어가는 딜러 → 테이블, 나오는 딜러는 휴식). 평소 교대는 표시 없이, 주의할 것만 표시
   function renderPreview() {
@@ -1004,9 +1120,12 @@
       setHTML($('preview'), '<p class="empty">로테이션을 시작하면 다음 교대가 여기에 미리 보입니다.</p>');
       return;
     }
+    const seatAfter = new Map(plan.moves.filter(m => m.toDealerId).map(m => [m.toDealerId, m.tableNo]));
     const rows = plan.moves.map(m => {
-      const [label, cls] = KIND[m.kind];
-      const out = m.fromDealerId ? `${esc(nameOf(m.fromDealerId))} 휴식` : '빈자리';
+      const [label, cls] = KIND[m.kind] || KIND.in;
+      // 나간 사람이 다른 테이블로 옮겨 앉으면(테이블 맞바꿈) 휴식이 아니라 그 테이블
+      const out = !m.fromDealerId ? '빈자리' : seatAfter.has(m.fromDealerId)
+        ? `${esc(nameOf(m.fromDealerId))} → ${seatAfter.get(m.fromDealerId)}번` : `${esc(nameOf(m.fromDealerId))} 휴식`;
       return `<tr><td><b>${m.toDealerId ? esc(nameOf(m.toDealerId)) : '—'}</b></td><td>→ ${tchip(m.tableNo)}</td>
         <td class="muted">${out}</td><td>${m.kind === 'in' ? '' : `<span class="tag ${cls}">${label}</span>`}</td></tr>`;
     }).join('');
@@ -1031,10 +1150,10 @@
   // 퇴근 희망 받기 (모든 딜러 휴대폰) + 희망자 목록
   function renderEoPanel() {
     const call = state.eoCall;
-    const on = state.dealers.filter(d => d.status !== 'off');
+    const on = state.dealers.filter(d => d.status === 'working' || d.status === 'break' || d.status === 'duty');
     const wanted = E.eoOrder(state); // 먼저 말한 사람부터
     const asked = on.filter(d => d.eoAsk);
-    const where = d => (d.status === 'working' ? `${E.tableOf(state, d.tableId).no}번 근무 중` : '휴식');
+    const where = d => (d.status === 'working' ? `${E.tableOf(state, d.tableId).no}번 근무 중` : d.status === 'duty' ? '다른 업무' : '휴식');
     const head = call.open
       ? `<div class="eo-head"><b>휴대폰으로 받는 중</b><span class="muted">${hhmm(call.at)}부터 · ${wanted.length}명</span>
            <button data-act="eo-close">마감</button></div>`
@@ -1093,7 +1212,14 @@
 
   // ---------- 렌더: 출퇴근 탭 ----------
 
-  function dutyMs(d, now) {
+  // 출근 예정 딜러 상태 글귀 — 딜러 현황판과 같은 말로
+  function planLabel(d, now) {
+    if (d.planAt == null) return d.checkAt != null ? '✓체크 · 다음 교대부터' : '출근 전';
+    if (d.checkAt != null) return `✓체크 · ${hhmm(d.planAt)}부터`;
+    return d.planAt <= now ? `${hhmm(d.planAt)} 지남 · 체크 안 함` : `${hhmm(d.planAt)} 출근 예정`;
+  }
+
+  function onDutyMs(d, now) { // 근무시간 (출근–퇴근)
     return d.sessions.reduce((sum, x) => sum + ((x.out == null ? now : x.out) - x.in), 0);
   }
   function dealingMs(d, now) {
@@ -1111,35 +1237,45 @@
       return;
     }
     const came = list.filter(r => r.state === 'in').length;
-    const label = { in: '출근', off: '퇴근함', none: '아직' };
+    const label = { in: '출근', off: '퇴근함', none: '아직', plan: '출근 예정' };
     const rows = list.map(r => `<li class="r-${r.state}">
       <label class="chk">
-        <input type="checkbox" data-act="attend" data-name="${esc(r.name)}"${r.state === 'in' ? ' checked' : ''}>
+        <input type="checkbox" data-act="attend" data-name="${esc(r.name)}"${r.state === 'in' || r.checked ? ' checked' : ''}>
         <b>${esc(r.name)}</b> <span class="grade">${esc(r.grade)}</span>
       </label>
-      <span class="r-state">${label[r.state]}</span>
+      <span class="r-state">${r.state !== 'plan' ? label[r.state] : planLabel(E.dealerOf(state, r.id), Date.now())}</span>
       <button class="mini" data-act="roster-del" data-name="${esc(r.name)}" title="명단에서 빼기">×</button>
     </li>`).join('');
     setHTML($('roster'), `<p class="muted roster-sum">${came} / ${list.length}명 출근</p><ul class="roster">${rows}</ul>`);
   }
+  function dutyMs(d, now) {
+    return (d.totalDutyMs || 0) + (d.status === 'duty' ? Math.max(0, E.clockNow(state, now) - d.since) : 0);
+  }
 
   function renderAttendance(now) {
+    const ord = d => (d.status === 'off' ? 2 : d.status === 'planned' ? 1 : 0);
     const list = state.dealers.slice()
-      .sort((a, b) => (a.status === 'off') - (b.status === 'off') || a.checkInAt - b.checkInAt);
+      .sort((a, b) => ord(a) - ord(b) || (a.checkInAt || a.planAt || 0) - (b.checkInAt || b.planAt || 0));
     if (!list.length) {
       setHTML($('attendanceList'), '<p class="empty">아직 출근한 딜러가 없습니다.</p>');
       return;
     }
     const rows = list.map(d => {
       const where = d.status === 'working' ? `${tchip(E.tableOf(state, d.tableId).no)} 근무`
-        : d.status === 'break' ? (d.hold ? '휴식 (보류)' : '휴식') : '퇴근';
+        : d.status === 'break' ? (d.hold ? '휴식 (보류)' : '휴식')
+          : d.status === 'duty' ? `업무 · ${esc(d.task)}`
+            : d.status === 'planned' ? planLabel(d, now) : '퇴근';
       const sessions = d.sessions.map(x => `${hhmm(x.in)}–${x.out == null ? '' : hhmm(x.out)}`).join(', ');
-      const actions = `<span class="pacts"><button class="mini" data-act="times-open" data-id="${d.id}" title="실제 출퇴근 시각으로 고치기">시간 고치기</button>${d.status === 'off'
+      const fix = d.sessions.length ? `<button class="mini" data-act="times-open" data-id="${d.id}" title="실제 출퇴근 시각으로 고치기">시간 고치기</button>` : '';
+      const actions = `<span class="pacts">${fix}${d.status === 'off'
         ? `<button class="mini" data-act="back" data-id="${d.id}">복귀</button>`
-        : `<button class="mini" data-act="home" data-id="${d.id}">퇴근</button>`}</span>`;
+        : d.status === 'planned'
+          ? `${d.checkAt != null ? '' : `<button class="mini" data-act="arrive" data-id="${d.id}">출근</button>`}<button class="mini" data-act="dealer-open" data-id="${d.id}">출근 시간</button>`
+          : `${E.canDelay(state, d.id, Date.now()) ? `<button class="mini" data-act="dealer-open" data-id="${d.id}" title="늦게 오면 — 바꾼 시각에 출근, 로테이션도 그에 맞춰">출근 시간 변경</button>` : ''}<button class="mini" data-act="home" data-id="${d.id}">퇴근</button>`}</span>`;
+      const duty = dutyMs(d, now);
       return `<tr class="${d.status}">
         <th>${esc(d.name)}</th><td>${esc(d.grade)}</td><td>${where}</td><td>${sessions}</td>
-        <td>${hm(dutyMs(d, now))}</td><td>${hm(dealingMs(d, now))}</td><td>${hm(restMs(d, now))}</td>
+        <td>${hm(onDutyMs(d, now))}</td><td>${hm(dealingMs(d, now))}${duty ? ` <small class="muted">+업무 ${hm(duty)}</small>` : ''}</td><td>${hm(restMs(d, now))}</td>
         <td>${actions}</td></tr>`;
     }).join('');
     setHTML($('attendanceList'), `<div class="scroll"><table class="grid">
@@ -1246,10 +1382,12 @@
       else localStorage.removeItem(ME_KEY);
     } catch (e) { /* 기억 못 해도 화면은 동작 */ }
   }
-  const placeText = v => (v == null || v === -1 ? '퇴근' : v === 0 ? '휴식' : `${v}번 테이블`);
-  const placeChip = v => (v == null || v === -1 ? '<span class="place off">퇴근</span>'
+  // -1 = 그때 없음 (휴대폰에서는 아직 출근 전), -2 = 다른 업무
+  const placeText = v => (v == null || v === -1 ? '출근 전' : v === 0 ? '휴식' : v === E.DUTY ? '다른 업무' : `${v}번 테이블`);
+  const placeChip = v => (v == null || v === -1 ? '<span class="place off">출근 전</span>'
     : v === 0 ? '<span class="place rest">휴식</span>'
-      : `<span class="place tb" style="--h:${hue(v)}">${v}</span>`);
+      : v === E.DUTY ? '<span class="place duty">업무</span>'
+        : `<span class="place tb" style="--h:${hue(v)}">${v}</span>`);
 
   // 퇴근 희망 카드 — 디렉터가 받기를 열었거나 나에게 물어봤을 때 버튼이 뜬다 (me.k = 지금 답할 수 있는 질문, me.q = 나에게 온 묻기)
   function meEoHtml(me) {
@@ -1271,6 +1409,42 @@
         '<button data-act="me-eo" data-w="0">취소</button>')
       : card('ask', '퇴근 희망 받는 중', '<b>일찍 퇴근하고 싶으면 눌러 주세요</b>',
         '<button class="primary" data-act="me-eo" data-w="1">퇴근 희망</button>');
+  }
+
+  // 출근 체크 카드 — 출근 예정인 딜러 휴대폰에 (딜러 QR로 연 화면 그대로). 일찍 눌러도 예정 시각에 투입
+  let meCiSending = false;
+  let myCheck = null; // 내가 보낸 출근 체크 {id, at(이 기기 시각)} — 디렉터가 반영할 때까지 '전달하는 중'
+  function meCheckHtml(me, id) {
+    if (!me.pl) return '';
+    const when = me.pa != null ? hhmm(PV.abs(me, me.pa)) : null;
+    const card = (cls, body, buttons) => `<section class="me-eo ${cls}"><span class="label">출근 체크</span>${body}
+      ${buttons ? `<div class="me-eo-actions">${buttons}</div>` : ''}</section>`;
+    if (me.ci) return card('done', `<b>출근 체크됨</b><small>${when ? `${when}부터 로테에 들어갑니다` : '곧 로테에 들어갑니다'}</small>`);
+    if (meCiSending || (myCheck && myCheck.id === id && Date.now() - myCheck.at < 120000)) {
+      return card('', '<b>출근 체크</b><small>디렉터 화면에 전달하는 중…</small>');
+    }
+    if (!remote) return card('', '<b>출근 전</b><small>딜러 QR로 연 휴대폰에서 출근 체크합니다</small>');
+    const early = me.pa != null && PV.abs(me, me.pa) > nowMs();
+    return card('ask', `<b>출근했으면 눌러 주세요</b><small>${early ? `일찍 눌러도 ${when}부터 투입됩니다` : '누르면 다음 교대부터 투입됩니다'}</small>`,
+      '<button class="primary" data-act="me-checkin">출근 체크</button>');
+  }
+
+  async function sendMyCheckIn() {
+    if (!remote || !myId || meCiSending) return;
+    const id = myId;
+    meCiSending = true;
+    render();
+    try {
+      await S.sendCheckIn(rdb(), remote.room, id);
+      myCheck = { id, at: Date.now() };
+      fastUntil = Date.now() + 30000;
+    } catch (err) {
+      toast(/Permission denied/i.test(err.message)
+        ? '출근 체크를 보내지 못했습니다 — 이미 출근 처리됐거나 출근 예정 명단에 없습니다. 디렉터에게 말해 주세요'
+        : '보내지 못했습니다 — 인터넷 연결을 확인하세요');
+    }
+    meCiSending = false;
+    render();
   }
 
   // 보낸 뒤 서버 시각(at)을 받아 둔다 → 디렉터가 반영하면(내 것의 ea가 같아지면) '전달하는 중'이 사라진다
@@ -1328,9 +1502,11 @@
     const next = PV.nextChange(me); // [시각, 자리]
     const soon = !!(next && me.c === 1 && next[0] - now <= me.w * E.MIN);
     // 일한 시간·쉰 시간은 딜러에게 보여주지 않는다 (사용자 요청) — 지금 상태만
-    const nowLine = !running ? '로테이션 시작 전'
-      : me.h ? '투입 보류 중'
-        : me.x > 0 ? '근무 중' : '';
+    const nowLine = me.pl ? (me.pa != null ? `${hhmm(PV.abs(me, me.pa))} 출근 예정` : '출근하면 내 순서가 보입니다')
+      : me.x === E.DUTY ? esc(me.tk)
+        : !running ? '로테이션 시작 전'
+          : me.h ? '투입 보류 중'
+            : me.x > 0 ? '근무 중' : '';
 
     const nextHtml = !running ? '' : next
       ? `<section class="me-next ${soon ? 'soon' : ''}">
@@ -1339,12 +1515,14 @@
              <div><b>${hhmm(next[0])}부터 ${placeText(next[1])}</b><small id="meCountdown"></small></div></div>
          </section>`
       : `<section class="me-next"><span class="label">다음 이동</span>
-           <div class="me-next-body"><b>아직 이동 예정이 없습니다</b></div></section>`;
+           <div class="me-next-body"><b>${me.pl ? '출근 체크하면 내 순서가 보입니다' : me.x === E.DUTY ? '업무가 끝나면 휴식 후 다시 순서대로' : '아직 이동 예정이 없습니다'}</b></div></section>`;
 
     setHTML(box, `
       <header class="me-head"><b>${esc(me.n)}</b><button class="mini" data-act="me-change">다른 이름</button></header>
       ${me.t ? `<p class="me-event">${esc(me.t)}</p>` : ''}
+      ${me.bt ? `<p class="me-button">오늘 버튼 <b>${me.bt}번</b></p>` : ''}
       ${noticeHtml}
+      ${meCheckHtml(me, data.id)}
       ${meEoHtml(me)}
       <section class="me-now">
         <span class="label">지금</span>
@@ -1388,6 +1566,7 @@
         renderAlerts(now);
         if (setHTML($('sheet'), sheetHTML(sheetView, null, null, true))) refreshPick();
         renderTables(now);
+        renderDealerBoard(now);
         renderPreview();
         renderEoPanel();
         renderPool(now);
@@ -1520,6 +1699,7 @@
       }
       if (event && AC.dirty(event) && wall - cloudTryAt > 30000) pushEvent(event.id); // 못 올린 변경 다시
       if (event && event.share && wall - sharePollAt >= SHARE_POLL_MS) { sharePollAt = wall; pollShared(wall); }
+      if (event) syncInbox(); // 같이 쓰기에서 교대 시계를 가져가거나 넘겨주면 받는 함도 따라간다
     }
     if (isList || isAdminView || blocked) return; // 목록·관리자 화면은 매초 다시 그릴 필요 없음
     if (isDirector && event) {
@@ -1534,6 +1714,17 @@
     const c = state.clock;
     helloOtherDirectors();
     if (isMe) meTick(now);
+    if (isDirector && event && iRunClock()) { // 같이 쓰는 중이면 시계를 든 PC에서만 (두 번 처리되지 않게)
+      // 출근 예정 시각이 된 딜러 자동 출근 → 교대보다 먼저 (이번 교대에 바로 들어가게)
+      const arrived = E.arriveDue(state, now);
+      if (arrived !== state) {
+        const names = state.dealers.filter(d => d.status === 'planned' && E.dealerOf(arrived, d.id).status !== 'planned').map(d => d.name);
+        commit(arrived);
+        chime(1);
+        toast(`출근: ${names.join(', ')} (예정 시각${state.settings.autoArrive ? ' — 체크 없이 자동. 안 왔으면 명단에서 눌러 출근 시간 변경' : ' — 출근 체크함'})`);
+      }
+      if (!state.button) commit(E.drawButton(state, Date.now(), Math.random())); // 오늘 버튼 (이벤트마다 한 번)
+    }
     // 같이 쓰는 중이면 교대·예고 음성은 시계를 든 PC에서만 (두 번 교대·겹치는 안내를 막는다)
     if (!isBoard && !isMe && iRunClock() && c.running && !c.paused && c.nextPushAt != null) {
       const left = c.nextPushAt - now;
@@ -1590,6 +1781,7 @@
     }
     if (String(step.at) !== String(at) && !confirm(`이 작업을 되돌릴까요?\n\n${hhmm(step.at)} ${step.label}`)) return;
     commit(E.revert(state, Date.now()));
+    takeCheckIns(true); // 되돌린 작업 뒤에 들어온 휴대폰 출근 체크는 그대로 살린다 (되돌리면 checkAt도 그 전으로 가므로)
     $('toast').hidden = true;
     toast(`되돌림: ${step.label}`);
   }
@@ -1613,26 +1805,43 @@
     }
   }
 
-  // 출근 처리: 퇴근했던 사람이면 복귀, 이미 출근 중이면 건너뜀
+  // 출근 처리: 예정 시각(at)이 지금보다 뒤면 '출근 예정'(그 시각에 자동 출근), 아니면 바로 출근.
+  // 출근 예정이던 사람은 출근(또는 시각 바꾸기), 퇴근했던 사람이면 복귀, 이미 출근 중이면 건너뜀
   function checkIn(entries) {
     const now = Date.now();
     let next = state;
     const fresh = [];
     const msgs = [];
     for (const e of entries) {
+      const later = e.at != null && e.at > now;
+      const plan = later ? `${e.name} ${hhmm(e.at)} 출근 예정` : null;
       const existing = next.dealers.find(d => d.name === e.name && d.status !== 'off') || next.dealers.find(d => d.name === e.name);
-      if (existing && existing.status !== 'off') {
+      if (existing && existing.status === 'planned') {
+        // 시각 없이 적으면 다른 [출근]과 같은 '출근 체크' — 예정 시각 전이면 그 시각에 투입
+        next = later ? E.setPlanAt(next, existing.id, e.at, now) : E.checkInDealer(next, existing.id, now, now);
+        const nd = E.dealerOf(next, existing.id);
+        msgs.push(plan || (nd.status === 'planned' ? `${e.name} 출근 체크 — ${hhmm(nd.planAt)}부터 투입` : `${e.name} 출근`));
+      } else if (existing && existing.status !== 'off') {
         msgs.push(`${e.name} 이미 출근 중`);
       } else if (existing) {
-        next = E.checkBack(next, existing.id, now);
-        msgs.push(`${e.name} 복귀`);
+        next = later ? E.setPlanAt(next, existing.id, e.at, now) : E.checkBack(next, existing.id, now);
+        msgs.push(plan || `${e.name} 복귀`);
       } else {
         fresh.push(e);
+        if (plan) msgs.push(plan);
       }
     }
     if (fresh.length) next = E.addDealers(next, fresh, now);
-    commit(next, `${entries.map(e => e.name).join(', ')} 출근`);
+    const allPlanned = entries.every(e => e.at != null && e.at > now);
+    commit(next, `${entries.map(e => e.name).join(', ')} ${allPlanned ? '출근 예정' : '출근'}`);
     if (msgs.length) toast(msgs.join(' · '));
+  }
+
+  // '김민수 18:00' → {name: '김민수', at}. 이름 뒤에 시각이 없으면 칸의 예정 시각(fallbackAt)
+  function parseEntry(text, grade, fallbackAt, now) {
+    const m = text.match(/^(.*?)\s*(\d{1,2}:\d{2})$/);
+    const at = m ? E.planTime(now, m[2]) : null;
+    return { name: (m && at != null ? m[1] : text).trim(), grade, at: at != null ? at : fallbackAt };
   }
 
   // 엑셀·카톡에서 한 줄에 한 명씩 복사한 명단을 붙여 넣으면 입력칸이 줄바꿈을 지워 이름이 하나로 붙는다
@@ -1669,7 +1878,8 @@
     if (!box) return;
     const name = box.dataset.name;
     const want = box.checked;
-    if (!want && !confirm(`${name} 퇴근 처리할까요?`)) {
+    const plan = (E.rosterView(state).find(r => r.name === name) || {}).state === 'plan';
+    if (!want && !confirm(plan ? `${name} 출근 예정을 취소할까요?` : `${name} 퇴근 처리할까요?`)) {
       box.checked = true;
       return;
     }
@@ -1678,18 +1888,23 @@
       render();
       return;
     }
-    commit(next, `${name} ${want ? '출근' : '퇴근'}`);
-    toast(`${name} ${want ? '출근' : '퇴근'}`, true);
+    const after = E.rosterView(next).find(r => r.name === name) || {};
+    const what = !want ? (plan ? '출근 예정 취소' : '퇴근') : after.checked ? `출근 체크 — ${hhmm(after.planAt)}부터 투입` : '출근';
+    commit(next, `${name} ${what}`);
+    toast(`${name} ${what}`, true);
   });
 
   document.querySelectorAll('.checkin-form').forEach(form => form.addEventListener('submit', e => {
     e.preventDefault();
     const f = form.elements;
+    const now = Date.now();
+    const at = f.at && f.at.value ? E.planTime(now, f.at.value) : null;
     const entries = f.names.value.split(/[,\n]/).map(s => s.trim()).filter(Boolean)
-      .map(name => ({ name, grade: f.grade.value || 'B' }));
+      .map(text => parseEntry(text, f.grade.value || 'B', at, now)).filter(x => x.name);
     if (!entries.length) return;
     checkIn(entries);
     f.names.value = '';
+    if (f.at) f.at.value = '';
   }));
 
   document.addEventListener('click', e => {
@@ -1702,11 +1917,13 @@
     }
     const b = e.target.closest('button[data-act]');
     if (!b) {
+      if (e.target.closest('.use-chk')) return; // [사용] 체크는 change에서
       const tile = e.target.closest('[data-table]');
       if (tile) openTableMenu(tile.dataset.table);
       return;
     }
-    if (b.closest('#dlgTable')) $('dlgTable').close();
+    // 시각을 적는 버튼은 검사를 통과했을 때만 닫는다 (틀리면 창을 남겨 다시 적게)
+    if (b.closest('#dlgTable') && !['roster-plan', 'arrive-time', 'plan-save'].includes(b.dataset.act)) $('dlgTable').close();
     const id = b.dataset.id;
     const t = id ? E.tableOf(state, id) : null;
     const d = id ? E.dealerOf(state, id) : null;
@@ -1722,6 +1939,13 @@
         break;
       case 'lock':
         if (t) commit(E.toggleTableLock(state, id, Date.now()), `${t.no}번 ${t.locked ? '고정 해제' : '고정'}`);
+        break;
+      case 'use':
+      case 'unuse':
+        if (t) setUse([t.id], b.dataset.act === 'use');
+        break;
+      case 'use-all':
+        setUse(E.idleTables(state).map(x => x.id), true);
         break;
       case 'assign-open':
         openAssign(id);
@@ -1801,6 +2025,9 @@
       case 'me-eo':
         sendMyEo(b.dataset.w === '1');
         break;
+      case 'me-checkin':
+        sendMyCheckIn();
+        break;
       case 'back':
         if (d) commit(E.checkBack(state, id, Date.now()), `${d.name} 복귀`);
         break;
@@ -1831,6 +2058,86 @@
       }
       case 'run-take':
         claimRun(Date.now()).then(() => toast('이 PC에서 교대를 돌립니다 (몇 초 뒤 반영됩니다)'));
+        break;
+      case 'dealer-open':
+        openDealerMenu(id);
+        break;
+      case 'roster-open':
+        openRosterMenu(b.dataset.name);
+        break;
+      case 'roster-in':
+      case 'roster-plan': {
+        const r = E.rosterView(state).find(x => x.name === b.dataset.name);
+        if (!r) break;
+        const v = b.dataset.act === 'roster-plan' && $('planAt') ? $('planAt').value : '';
+        const at = v ? E.planTime(Date.now(), v) : null;
+        if (b.dataset.act === 'roster-plan' && at == null) {
+          toast('출근 예정 시각을 적으세요');
+          break;
+        }
+        $('dlgTable').close();
+        checkIn([{ name: r.name, grade: r.grade, at }]);
+        break;
+      }
+      case 'arrive': // 출근 체크: 예정 시각 전이면 그 시각에 투입, 아니면 지금 출근
+      case 'arrive-now':
+        if (d && d.status === 'planned') {
+          const now = Date.now();
+          commit(b.dataset.act === 'arrive-now' ? E.arrive(state, [d.id], now) : E.checkInDealer(state, d.id, now, now), `${d.name} 출근`);
+          const nd = E.dealerOf(state, d.id);
+          toast(nd.status === 'planned' ? `${d.name} 출근 체크 — ${hhmm(nd.planAt)}부터 투입`
+            : `${d.name} 출근 — ${nd.status === 'working' ? `${E.tableOf(state, nd.tableId).no}번 투입` : '다음 교대에 첫 번째로'}`, true);
+        }
+        break;
+      case 'arrive-time': { // 이미 출근 처리된 딜러의 출근 시간을 뒤로 → 그 시각에 다시 출근
+        if (!d) break;
+        const now = Date.now();
+        const v = $('arriveAt') ? $('arriveAt').value : '';
+        const at = v ? E.planTime(now, v) : null;
+        if (at == null || at <= now) {
+          toast('지금보다 뒤 시각을 적으세요 — 이미 지난 출근 시각을 고치려면 출퇴근 탭의 \'시간 고치기\'');
+          break;
+        }
+        $('dlgTable').close();
+        const from = d.status === 'working' ? E.tableOf(state, d.tableId).no : 0;
+        commit(E.delayArrival(state, d.id, at, now), `${d.name} 출근 시간 변경`);
+        toast(`${d.name} ${hhmm(at)} 출근으로 변경 — 그 뒤 교대부터 투입${from ? ` (${from}번은 원래 딜러가 계속)` : ''}`, true);
+        break;
+      }
+      case 'plan-save': {
+        if (!d) break;
+        const v = $('planAt') ? $('planAt').value : '';
+        const at = v ? E.planTime(Date.now(), v) : null;
+        $('dlgTable').close();
+        commit(E.setPlanAt(state, d.id, at, Date.now()), `${d.name} 출근 예정 시각`);
+        toast(at == null ? `${d.name} 예정 시각 지움 (출근 전)` : `${d.name} ${hhmm(at)} 출근 예정${at <= Date.now() && state.settings.autoArrive !== false ? ' — 시각이 지나 바로 출근' : ''}`);
+        break;
+      }
+      case 'plan-remove':
+        if (d && confirm(`${d.name} 출근 예정을 취소할까요?`)) commit(E.removePlanned(state, d.id, Date.now()), `${d.name} 출근 예정 취소`);
+        break;
+      case 'duty-open':
+        openDuty(id);
+        break;
+      case 'duty-start': {
+        if (!d) break;
+        const task = (b.dataset.task || ($('dutyTask') ? $('dutyTask').value : '')).trim() || '다른 업무';
+        const from = d.status === 'working' ? E.tableOf(state, d.tableId).no : 0;
+        commit(E.startDuty(state, d.id, task, Date.now()), `${d.name} 다른 업무`);
+        toast(`${d.name} — ${task}${from ? ` (${from}번은 다음 순서 딜러로)` : ''}`, true);
+        break;
+      }
+      case 'duty-end':
+        if (d) {
+          commit(E.endDuty(state, d.id, Date.now()), `${d.name} 업무 끝`);
+          toast(`${d.name} 업무 끝 — 휴식 (업무한 만큼 근무로 계산)`, true);
+        }
+        break;
+      case 'button-draw':
+        if (confirm(`오늘 버튼을 다시 뽑을까요? (지금 ${state.button ? `${state.button.no}번` : '없음'})\n딜러 휴대폰에도 새 번호가 보입니다.`)) {
+          commit(E.drawButton(state, Date.now(), Math.random()));
+          toast(`오늘 버튼 ${state.button.no}번`);
+        }
         break;
       case 'delnotice':
         commit(E.removeNotice(state, id));
@@ -1931,7 +2238,15 @@
       toast(`삭제하지 못했습니다 — ${S.explainError(e.message)}`);
       return false;
     }
-    if (ev.room) clearRoom(ev.room);
+    if (ev.share) { // 같이 쓰던 이벤트: 주인이 지우면 같이 쓰기도 끄고, 들어온 계정이 지우면 나가기만
+      const t = await syncIdToken().catch(() => null);
+      if (t && ev.guest) await S.put(FB.databaseURL, `shared/${ev.share}/members/${auth.uid}`, null, t).catch(() => {});
+      else if (t) {
+        await S.put(FB.databaseURL, `shared/${ev.share}`, null, t).catch(() => {});
+        if (ev.room) await S.put(FB.databaseURL, `roomShare/${ev.room}`, null, t).catch(() => {});
+      }
+    }
+    if (ev.room && !ev.guest) clearRoom(ev.room); // 들어온 계정은 주인의 방을 비우지 않는다
     EV.remove(store, id);
     render();
     toast(`'${ev.name}' 삭제됨`);
@@ -1940,7 +2255,7 @@
 
   document.addEventListener('keydown', e => {
     const tile = (e.key === 'Enter' || e.key === ' ') && e.target.closest && e.target.closest('[data-table]');
-    if (!tile || e.target.closest('button')) return;
+    if (!tile || e.target.closest('button, input')) return;
     e.preventDefault();
     openTableMenu(tile.dataset.table);
   });
@@ -2010,12 +2325,144 @@
     location.href = eventUrl(ev.id); // 계정에는 이벤트 화면이 열리면서 올린다
   });
 
+  // ---------- 딜러 현황 (테이블 오른쪽) ----------
+  // 출근 예정(시각 순) → 출근(테이블 · 다른 업무 · 휴식) → 명단에서 아직 안 온 사람.
+  // 누르면 딜러 메뉴, 출근 예정·명단은 [출근] 바로. 출퇴근 탭의 '출근자 명단'(state.roster)과 같은 사람들이다
+
+  function renderDealerBoard(now) {
+    const plan = state.dealers.filter(d => d.status === 'planned')
+      .sort((a, b) => (a.planAt == null) - (b.planAt == null) || (a.planAt || 0) - (b.planAt || 0) || a.name.localeCompare(b.name, 'ko'));
+    const rank = d => (d.status === 'working' ? 0 : d.status === 'duty' ? 1 : 2);
+    const order = poolInOrder(now).map(d => d.id);
+    const tno = d => (d.status === 'working' ? E.tableOf(state, d.tableId).no : 0);
+    const on = state.dealers.filter(d => d.status === 'working' || d.status === 'duty' || d.status === 'break')
+      .sort((a, b) => rank(a) - rank(b) || tno(a) - tno(b) || order.indexOf(a.id) - order.indexOf(b.id));
+    const chip = (d, cls, sub, extra) => `<div class="rbtn ${cls}"><button type="button" data-act="dealer-open" data-id="${d.id}"
+      title="${esc(d.name)} — 눌러서 출근·출근 시간·다른 업무·퇴근"><b>${esc(d.name)}</b><small>${sub}</small></button>${extra || ''}</div>`;
+    const planHtml = plan.map(d => {
+      const checked = d.checkAt != null;
+      const due = d.planAt != null && d.planAt <= now && !checked;
+      const sub = d.planAt == null ? '출근 전' : `${hhmm(d.planAt)}${checked ? ' ✓체크' : due ? ' 체크 안 함' : ''}`;
+      return chip(d, `plan${due ? ' due' : ''}${checked ? ' checked' : ''}`, sub, checked ? ''
+        : `<button type="button" class="mini" data-act="arrive" data-id="${d.id}" title="${d.planAt != null && d.planAt > now
+          ? `출근 체크 — ${hhmm(d.planAt)}부터 투입` : '지금 출근'}">출근</button>`);
+    }).join('');
+    const onHtml = on.map(d => (d.status === 'working' ? chip(d, 'work', `${tno(d)}번`)
+      : d.status === 'duty' ? chip(d, 'duty', esc(d.task || '업무'))
+        : chip(d, `rest${d.hold ? ' held' : ''}`, d.hold ? '보류' : `휴식 ${minutes(E.restedMs(d, now))}분`))).join('');
+    const wait = E.rosterView(state).filter(r => r.state === 'none' || r.state === 'off');
+    const waitHtml = wait.map(r => (r.state === 'off'
+      ? chip(E.dealerOf(state, r.id), 'wait', '퇴근함', `<button type="button" class="mini" data-act="back" data-id="${r.id}" title="다시 출근">복귀</button>`)
+      : `<div class="rbtn wait"><button type="button" data-act="roster-open" data-name="${esc(r.name)}"
+          title="${esc(r.name)} — 눌러서 출근·출근 예정 시각"><b>${esc(r.name)}</b><small>아직</small></button><button type="button" class="mini" data-act="roster-in" data-name="${esc(r.name)}" title="지금 출근">출근</button></div>`)).join('');
+    setHTML($('dealerBoard'), `<div class="dboard-head"><b>딜러 현황</b></div>
+      <p class="dboard-note">딜러가 휴대폰(딜러 QR)에서 <b>출근 체크</b>해야 투입 · 일찍 체크해도 예정 시각에</p>
+      <label class="chk dboard-auto" title="켜면 출근 체크가 없어도 예정 시각에 출근 처리합니다 (안 온 딜러는 눌러서 출근 시간 변경)"><input type="checkbox" data-auto-arrive${state.settings.autoArrive ? ' checked' : ''}> 체크 없이 출근</label>
+      <h3>출근 예정 ${plan.length}</h3>
+      <div class="rlist">${planHtml || '<p class="empty">출근 칸에 이름 + 예정 시각</p>'}</div>
+      <h3>출근 ${on.length}</h3>
+      <div class="rlist">${onHtml || '<p class="empty">없음</p>'}</div>
+      ${wait.length ? `<h3>명단 · 아직 ${wait.length}</h3><div class="rlist">${waitHtml}</div>` : ''}`);
+  }
+
+  // 명단에만 있고 아직 안 온 사람: 지금 출근 / 출근 예정 시각
+  function openRosterMenu(name) {
+    const r = E.rosterView(state).find(x => x.name === name);
+    if (!r) return;
+    $('tableTitle').innerHTML = `${esc(r.name)} <span class="grade">${esc(r.grade)}</span> <span class="muted">명단 · 아직 안 옴</span>`;
+    $('tableBody').innerHTML = `<div class="menu">
+      <button type="button" class="primary" data-act="roster-in" data-name="${esc(r.name)}"><b>출근</b><small>지금 출근 — 공석이 있으면 바로, 없으면 다음 교대에 첫 번째로</small></button>
+      <div class="plan-edit"><label>출근 예정 시간 <input type="time" id="planAt"></label>
+        <button type="button" data-act="roster-plan" data-name="${esc(r.name)}">저장</button><small class="muted">그 시각에 출근 · 그 뒤 가장 가까운 교대부터</small></div>
+    </div>`;
+    $('dlgTable').showModal();
+  }
+
+  // 딜러 메뉴 (명단을 눌렀을 때): 출근 예정 → 출근·출근 시간·취소 / 출근 → 출근 시간 변경·다른 업무·보류·퇴근 희망·퇴근 / 퇴근 → 복귀·출근 예정
+  function openDealerMenu(dealerId) {
+    const d = E.dealerOf(state, dealerId);
+    if (!d) return;
+    const item = (act, title, desc, cls) => `<button type="button" data-act="${act}" data-id="${d.id}"${cls ? ` class="${cls}"` : ''}>
+      <b>${title}</b><small>${desc}</small></button>`;
+    const planEdit = `<div class="plan-edit"><label>출근 시간 <input type="time" id="planAt" value="${d.planAt == null ? '' : hhmm(d.planAt)}"></label>
+      <button type="button" data-act="plan-save" data-id="${d.id}">저장</button><small class="muted">출근 체크하면 그 시각부터 투입 · 비우면 시각 없이 '출근 전'</small></div>`;
+    let where;
+    const items = [];
+    if (d.status === 'planned') {
+      const early = d.planAt != null && d.planAt > Date.now();
+      where = d.planAt == null ? '출근 전' : `${hhmm(d.planAt)} 출근 예정${d.checkAt != null ? ` · ${hhmm(d.checkAt)} 출근 체크함` : ''}`;
+      if (early && d.checkAt == null) items.push(item('arrive', '출근 체크', `왔으면 — ${hhmm(d.planAt)}부터 투입 (휴대폰 출근 체크와 같음)`, 'primary'));
+      if (early) items.push(item('arrive-now', '지금 바로 투입', '예정 시각 전이라도 지금 출근 — 공석이 있으면 바로, 없으면 다음 교대에 첫 번째로'));
+      else items.push(item('arrive', '출근', '지금 출근 — 공석이 있으면 바로, 없으면 다음 교대에 첫 번째로', 'primary'));
+      items.push(planEdit, item('plan-remove', '출근 예정 취소', d.sessions.length ? '오늘 출근 기록은 남기고 퇴근 상태로' : '출근 예정만 지움 (출근자 명단에는 남음)', 'danger'));
+    } else if (d.status === 'off') {
+      where = '퇴근';
+      items.push(item('back', '복귀', '지금 다시 출근'), planEdit);
+    } else {
+      where = d.status === 'working' ? `${E.tableOf(state, d.tableId).no}번 근무 중` : d.status === 'duty' ? `다른 업무 · ${d.task}` : '휴식 중';
+      if (E.canDelay(state, d.id, Date.now())) {
+        const last = d.sessions[d.sessions.length - 1];
+        items.push(`<div class="plan-edit warn-box"><label>출근 시간 변경 <input type="time" id="arriveAt" value="${hhmm(last.in)}"></label>
+          <button type="button" class="warn" data-act="arrive-time" data-id="${d.id}">변경</button>
+          <small class="muted">늦게 오면 — 바꾼 시각에 출근하고 로테이션도 그 뒤 교대부터${d.status === 'working' ? ` (${E.tableOf(state, d.tableId).no}번은 원래 딜러가 계속)` : ''}</small></div>`);
+      }
+      if (d.status === 'duty') {
+        items.push(item('duty-end', '업무 끝', '휴식으로 — 업무한 시간은 근무로 계산 (그만큼 더 쉼)', 'primary'),
+          item('duty-open', '업무 내용 바꾸기', esc(d.task)));
+      } else {
+        items.push(item('duty-open', '다른 업무', `${d.status === 'working' ? '테이블에서 빼고 ' : ''}칩 정리·등록 등 — 로테에 들어간 것처럼 근무로 계산`));
+      }
+      if (d.status === 'break') items.push(item('hold', d.hold ? '보류 해제' : '투입 보류', d.hold ? '다시 자동으로 투입' : '자동으로 투입하지 않음 (식사·개인 사정)'));
+      items.push(item('eo-open', '퇴근 희망', '표시하거나 휴대폰으로 묻기'), item('home', '퇴근', '퇴근 처리', 'danger'));
+    }
+    $('tableTitle').innerHTML = `${esc(d.name)} <span class="grade">${esc(d.grade)}</span> <span class="muted">${esc(where)}</span>`;
+    $('tableBody').innerHTML = `<div class="menu">${items.join('')}</div>`;
+    $('dlgTable').showModal();
+  }
+
+  // 다른 업무 창: 내용을 적거나 자주 쓰는 것을 고른다
+  const DUTY_PICKS = ['칩 정리', '등록·바이인', '플로어', '테이블 세팅', '카드 교체'];
+  function openDuty(dealerId) {
+    const d = E.dealerOf(state, dealerId);
+    if (!d) return;
+    const picks = [...new Set(state.dealers.filter(x => x.status === 'duty').map(x => x.task).concat(DUTY_PICKS))];
+    $('tableTitle').innerHTML = `${esc(d.name)} 다른 업무`;
+    $('tableBody').innerHTML = `<p class="hint">테이블에는 안 들어가지만 로테에 들어간 것처럼 근무로 계산합니다${d.status === 'working'
+      ? ` (${E.tableOf(state, d.tableId).no}번은 다음 순서 딜러로)` : ''}. 끝나면 명단에서 눌러 [업무 끝] — 일한 만큼 더 쉽니다.</p>
+      <div class="duty-edit"><input id="dutyTask" maxlength="30" placeholder="업무 내용 (예: 칩 정리)" value="${esc(d.task || '')}" autocomplete="off">
+        <button type="button" class="primary" data-act="duty-start" data-id="${d.id}">시작</button></div>
+      <div class="picks">${picks.map(p => `<button type="button" data-act="duty-start" data-id="${d.id}" data-task="${esc(p)}">${esc(p)}</button>`).join('')}</div>`;
+    $('dlgTable').showModal();
+    setTimeout(() => { const i = $('dutyTask'); if (i) i.focus(); }, 0);
+  }
+
+  // 창 안의 입력칸에서 Enter = 옆의 저장/시작 버튼 (그냥 두면 창이 닫히기만 한다)
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || !e.target.matches || !e.target.matches('#dutyTask, #planAt, #arriveAt')) return;
+    e.preventDefault();
+    const b = e.target.closest('.duty-edit, .plan-edit').querySelector('button[data-act]');
+    if (b) b.click();
+  });
+
   // ---------- 테이블 메뉴 (테이블 칸을 눌렀을 때) ----------
 
   function openTableMenu(tableId) {
     const t = E.tableOf(state, tableId);
     if (!t || t.status !== 'open') return;
     const d = t.dealerId ? E.dealerOf(state, t.dealerId) : null;
+    const item = (act, title, desc, cls) => `<button type="button" data-act="${act}" data-id="${t.id}"${cls ? ` class="${cls}"` : ''}>
+      <b>${title}</b><small>${desc}</small></button>`;
+    if (t.use === false) {
+      $('tableTitle').innerHTML = `${tchip(t.no)} 대기 <span class="muted">열려 있지만 딜러 없음</span>`;
+      $('tableBody').innerHTML = `<div class="menu">
+        ${item('use', '사용', '다음 순서 딜러를 바로 넣기', 'primary')}
+        ${item('assign-open', '딜러 지정', '넣을 딜러를 직접 고르기 (사용으로 바뀜)')}
+        ${item('lock', t.locked ? '고정 해제' : '고정', t.locked ? '다시 자동 교대에 넣기' : '자동 교대에서 빼기 (파이널 테이블 등)')}
+        ${item('close', '깨기', '테이블을 닫기', 'danger')}
+      </div>`;
+      $('dlgTable').showModal();
+      return;
+    }
     if (!d) {
       openAssign(tableId); // 공석이면 바로 딜러 넣기
       return;
@@ -2023,8 +2470,6 @@
     const now = Date.now();
     const plan = nextPlan();
     const m = plan && plan.moves.find(x => x.tableId === t.id && x.toDealerId);
-    const item = (act, title, desc, cls) => `<button type="button" data-act="${act}" data-id="${t.id}"${cls ? ` class="${cls}"` : ''}>
-      <b>${title}</b><small>${desc}</small></button>`;
     $('tableTitle').innerHTML = `${tchip(t.no)} ${esc(d.name)} <span class="grade">${esc(d.grade)}</span>`;
     $('tableBody').innerHTML = `
       <p class="meta">연속 ${minutes(E.workedMs(state, d, now))}분 근무${m
@@ -2034,6 +2479,9 @@
         ${item('relieve', '지금 교체', `다음 순서 딜러를 바로 넣고 ${esc(d.name)}은(는) 휴식`)}
         ${item('undo-open', '바로잡기', '앉아 있는 사람이 화면과 다를 때 — 교대 안 함 · 다른 사람 · 자리 바뀜', E.undoInfo(state, t.id, now) ? 'warn' : '')}
         ${item('lock', t.locked ? '고정 해제' : '고정', t.locked ? '다시 자동 교대에 넣기' : '자동 교대에서 빼기 (파이널 테이블 등)')}
+        <button type="button" data-act="duty-open" data-id="${d.id}"><b>다른 업무</b><small>${esc(d.name)}은(는) 테이블에서 빠져 다른 업무 — 로테에 들어간 것처럼 근무로 계산</small></button>
+        ${E.canDelay(state, d.id, Date.now()) ? `<button type="button" class="warn" data-act="dealer-open" data-id="${d.id}"><b>출근 시간 변경</b><small>${esc(d.name)}이(가) 늦게 옴 — 바꾼 시각에 출근, 로테이션도 그에 맞춰</small></button>` : ''}
+        ${item('unuse', '사용 안 함', `${esc(d.name)}은(는) 휴식, 테이블은 열린 채 대기 (다시 체크하면 투입)`)}
         ${item('close', '깨기', `테이블을 닫고 ${esc(d.name)}은(는) 휴식`, 'danger')}
       </div>`;
     $('dlgTable').showModal();
@@ -2055,9 +2503,11 @@
     const workers = E.working(state).filter(d => d.tableId !== t.id)
       .sort((a, b) => E.tableOf(state, a.tableId).no - E.tableOf(state, b.tableId).no)
       .map(d => btn(d, `${E.tableOf(state, d.tableId).no}번 근무 중 → 자리 교환`));
+    const onTask = state.dealers.filter(d => d.status === 'duty').map(d => btn(d, `업무 · ${esc(d.task)} → 끝내고 투입`));
     $('assignBody').innerHTML = `
       <h3>휴식 중 <small class="muted">넣으면 ${cur ? esc(cur.name) + '은(는) 휴식' : '바로 투입'}</small></h3>
       <div class="picks">${pool.join('') || '<p class="empty">없음</p>'}</div>
+      ${onTask.length ? `<h3>다른 업무 중</h3><div class="picks">${onTask.join('')}</div>` : ''}
       <h3>근무 중</h3>
       <div class="picks">${workers.join('') || '<p class="empty">없음</p>'}</div>`;
     $('dlgAssign').showModal();
@@ -2151,12 +2601,22 @@
       return;
     }
     const keep = skip.length ? E.rangeText(skip) : '';
-    let next = E.openTable(state, nos, Date.now(), { feature: f.feature.checked });
+    const use = f.use.checked;
+    const opened = nos.filter(no => !E.activeTables(state).some(t => t.no === no));
+    const started = use ? nos.filter(no => E.idleTables(state).some(t => t.no === no)) : [];
+    let next = E.openTable(state, nos, Date.now(), { feature: f.feature.checked, use });
     if (keep !== skipText()) next = E.updateSettings(next, { skipTables: keep });
-    commit(next, `${E.rangeText(nos)}번 테이블 오픈`);
+    if (use !== !!state.settings.openUse) next = E.updateSettings(next, { openUse: use });
+    commit(next, `${E.rangeText(nos)}번 테이블 오픈${use ? '' : ' (대기)'}`);
     e.target.reset();
     f.skip.value = keep;
-    toast(`${nos.length}개 테이블 오픈${skipped.length ? ` — ${E.rangeText(skipped)}번은 뺌` : ''}`);
+    f.use.checked = use;
+    const msg = [
+      opened.length && `${opened.length}개 테이블 오픈${use ? '' : ' — 대기 (칸에서 [사용]을 체크하면 딜러 투입)'}`,
+      started.length && `${E.rangeText(started)}번 사용 — 딜러 투입`,
+      skipped.length && `${E.rangeText(skipped)}번은 뺌`,
+    ].filter(Boolean);
+    toast(msg.join(' · ') || '이미 열려 있습니다');
   });
 
   $('formQuickNotice').addEventListener('submit', e => {
@@ -2164,7 +2624,7 @@
     const f = e.target.elements;
     commit(E.addNotice(state, f.text.value, Date.now()));
     f.text.value = '';
-    toast('공지 등록됨 — 딜러 휴대폰·보드에 보입니다');
+    toast('공지 등록됨 — 딜러 휴대폰에 보입니다');
   });
 
   $('formNotice').addEventListener('submit', e => {
@@ -2178,10 +2638,10 @@
   $('btnPayroll').addEventListener('click', () => {
     const now = Date.now();
     const q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
-    const rows = [['이름', '등급', '출근–퇴근', '근무시간(분)', '딜링(분)', '휴식(분)']];
-    for (const d of state.dealers) {
+    const rows = [['이름', '등급', '출근–퇴근', '근무시간(분)', '딜링(분)', '다른 업무(분)', '휴식(분)']];
+    for (const d of state.dealers.filter(x => x.sessions.length)) { // 출근한 적 없는 출근 예정자는 빼고
       rows.push([d.name, d.grade, d.sessions.map(x => `${hhmm(x.in)}-${x.out == null ? '' : hhmm(x.out)}`).join(' / '),
-        minutes(dutyMs(d, now)), minutes(dealingMs(d, now)), minutes(restMs(d, now))]);
+        minutes(onDutyMs(d, now)), minutes(dealingMs(d, now)), minutes(dutyMs(d, now)), minutes(restMs(d, now))]);
     }
     download(`work-hours-${today()}.csv`, '﻿' + rows.map(r => r.map(q).join(',')).join('\r\n'), 'text/csv');
   });
@@ -2262,8 +2722,8 @@
       return pick.rest && !rest && pick.n >= 1 && n >= 1 && n !== pick.n;
     }
     if (n !== pick.n) return false;      // 다른 딜러 + 다른 시각은 무슨 뜻인지 알 수 없다
-    if (n === 0) return !(pick.rest && rest); // 지금 칸: 한쪽이라도 앉아 있어야 바꿀 게 있다
-    return pick.rest !== rest;           // 예정 칸: '휴식 ↔ 테이블'만. 앉은 딜러끼리는 교대로 자리를 못 바꾼다
+    // 휴식끼리는 바꿀 게 없다. 예정 칸의 '테이블 ↔ 테이블'은 그 교대에 두 사람의 테이블 맞바꿈 (2026-10-24 사용자 요청)
+    return !(pick.rest && rest);
   }
 
   function setPick(td) {
@@ -2308,7 +2768,17 @@
       const seat = i => (i === 0 ? E.snapshot(state)[who] : (p[i - 1] || { a: {} }).a[who]);
       return seat(n) === 0 && (seat(n - 1) === 0 || seat(n + 1) === 0) ? ' · 연이어 두 번 쉬게 됩니다' : '';
     };
-    if (n === from.n) {
+    if (n === from.n && !from.rest && !rest) {
+      // 테이블 칸 ↔ 테이블 칸: 그 교대 뒤 두 사람의 테이블을 맞바꾼다
+      const before = (projection()[n - 1] || { a: {} }).a;
+      commit(E.planTrade(state, n, from.id, id, now), `${nameOf(from.id)} ↔ ${nameOf(id)} 테이블 맞바꿈`);
+      const p = (projection()[n - 1] || { a: {} }).a;
+      if (p[from.id] === before[from.id]) {
+        toast(`${when} — 바꾸지 못했습니다: 그 사이 상황이 달라져 두 사람이 그 교대에 함께 앉지 않습니다`, true);
+      } else {
+        toast(`${when} — 테이블 맞바꿈: ${nameOf(from.id)} ${p[from.id]}번 · ${nameOf(id)} ${p[id]}번`, true);
+      }
+    } else if (n === from.n) {
       // 쉬는 칸 쪽이 '쉬지 않을 사람'(a), 앉은 칸 쪽이 '대신 쉴 사람'(b) — 어느 쪽을 끌었든 같다
       const a = from.rest ? from.id : id;
       const b = from.rest ? id : from.id;
@@ -2404,10 +2874,10 @@
         head: { rev: 1, by: String(auth.name || auth.email || '').slice(0, 60), at: Date.now() },
         state: store.getItem(EV.stateKey(id)) || 'null',
       }, token);
-      // 딜러 방도 같이 쓰게 (교대 시계를 가져간 쪽이 딜러 휴대폰·TV를 갱신해야 한다)
-      if (ev.room) await S.put(FB.databaseURL, `rooms/${ev.room}/share`, code, token).catch(() => {});
       const cur = EV.update(store, id, { share: code, sharedRev: 1, rev: (ev.rev || 0) + 1 });
       if (event && event.id === id && cur) event = cur;
+      // 딜러 방도 같이 쓰게 (교대 시계를 가져간 쪽이 딜러 휴대폰·TV를 갱신해야 한다)
+      await linkShareRoom(cur || ev);
       pushMeta(id);
       renderTeam(id);
       render();
@@ -2433,7 +2903,10 @@
         return;
       }
       await S.put(FB.databaseURL, `shared/${ev.share}`, null, token).catch(() => {});
-      if (ev.room) await S.put(FB.databaseURL, `rooms/${ev.room}/share`, null, token).catch(() => {});
+      if (ev.room) {
+        await S.put(FB.databaseURL, `roomShare/${ev.room}`, null, token).catch(() => {});
+        await S.put(FB.databaseURL, `rooms/${ev.room}/share`, null, token).catch(() => {});
+      }
       const cur = EV.update(store, id, { share: null, sharedRev: 0, rev: (ev.rev || 0) + 1 });
       if (event && event.id === id && cur) event = cur;
       shareRun = null;
@@ -2476,6 +2949,7 @@
       try { st = JSON.parse(typeof node.state === 'string' ? node.state : 'null'); } catch (err) { st = null; }
       const ev = EV.create(store, node.name || '같이 쓰는 이벤트', Date.now(), st || E.createState(), {
         id: `sh-${code}`, share: code, guest: true, sharedRev: Number(node.head && node.head.rev) || 0,
+        room: node.room ? String(node.room) : null, // 새 방을 만들지 않고 주인의 딜러 QR 방을 같이 쓴다
       });
       pushMeta(ev.id);
       $('dlgJoin').close();
@@ -2612,18 +3086,26 @@
   function renderShare() {
     const body = $('shareBody');
     const forEvent = `<p class="hint">이벤트 <b>${esc(event.name)}</b> 전용 링크·QR입니다. 다른 이벤트는 그 이벤트를 열어서 따로 만듭니다.</p>`;
-    if (isPublisher()) {
+    // 같이 쓰는 중에는 시계를 든 PC가 딜러 휴대폰을 갱신한다 — 다른 PC도 같은 링크·QR을 보여 주기만 (새 방을 만들지 않는다)
+    if (room() && (isPublisher() || event.share)) {
       const me = linkFor('me');
-      const status = syncStatus === 'error' ? `<p class="conn bad">공유 오류 · ${esc(syncError)}</p>`
-        : syncStatus === 'live' ? '<p class="conn ok">공유 중 — 이 PC에서 바꾸는 내용이 딜러 휴대폰에는 30초, 딜러룸 TV에는 15초 안에 보입니다</p>'
-          : '<p class="conn">연결하는 중…</p>';
+      const status = !isPublisher() ? '<p class="conn ok">같이 쓰는 중 — 교대 시계를 든 PC가 딜러 휴대폰을 갱신합니다</p>'
+        : syncStatus === 'error' ? `<p class="conn bad">공유 오류 · ${esc(syncError)}</p>`
+          : syncStatus === 'live' ? '<p class="conn ok">공유 중 — 이 PC에서 바꾸는 내용이 딜러 휴대폰에 30초 안에 보입니다</p>'
+            : '<p class="conn">연결하는 중…</p>';
       body.innerHTML = `${status}${forEvent}
         <p class="hint">딜러는 휴대폰 카메라로 아래 QR을 찍거나 링크를 열고, 자기 이름을 한 번 고르면 됩니다.
           '홈 화면에 추가'하면 다음부터 앱처럼 바로 열립니다.</p>
         <h3>딜러 휴대폰</h3>${urlBox(me)}
-        <h3>딜러룸 TV (다른 컴퓨터에서 열 때)</h3>${urlBox(linkFor('board'))}
-        <div class="row-actions"><button type="button" class="danger" data-act="sync-off">이 이벤트 공유 끊기</button></div>`;
+        ${SHOW_TV ? `<h3>딜러룸 TV (다른 컴퓨터에서 열 때)</h3>${urlBox(linkFor('board'))}` : ''}
+        ${event.guest ? '' : '<div class="row-actions"><button type="button" class="danger" data-act="sync-off">이 이벤트 공유 끊기</button></div>'}`;
       drawQr(me);
+      return;
+    }
+    if (event.guest) { // 주인 PC가 아직 링크를 이어 두지 않았다 (주인이 이 이벤트를 한 번 열면 생긴다)
+      $('shareQr').innerHTML = '';
+      body.innerHTML = `${forEvent}<p class="hint">같이 쓰는 이벤트입니다. 딜러 링크·QR은 주인 계정의 것을 함께 씁니다 —
+        주인 PC에서 이 이벤트를 한 번 열면 여기에도 보입니다.</p>`;
       return;
     }
     $('shareQr').innerHTML = '';
@@ -3130,6 +3612,7 @@
   } else {
     $('eventName').textContent = event.name;
     $('formTables').elements.skip.value = skipText();
+    $('formTables').elements.use.checked = !!state.settings.openUse;
     document.title = `${event.name} · 딜러 디렉터`;
     applyTab();
     window.addEventListener('hashchange', () => {
@@ -3158,8 +3641,9 @@
     if (AC.dirty(event)) scheduleCloud(event.id, 0); // 방금 만든 이벤트·못 올린 변경
     if (isPublisher()) publish(false);
     startInbox();
-    // 이 이벤트의 딜러 링크(QR)가 아직 없으면 바로 만든다 ('공유 끊기'한 이벤트는 제외)
-    if (!room() && !event.shareOff) openRoom();
+    // 이 이벤트의 딜러 링크(QR)가 아직 없으면 바로 만든다 ('공유 끊기'한 이벤트, 같이 쓰기에 들어온 이벤트는 제외 — 주인의 방을 쓴다)
+    if (!room() && !event.shareOff && !event.guest) openRoom();
+    if (event.share && !event.guest && room()) linkShareRoom(event); // 예전에 켠 같이 쓰기도 새 방식으로 이어 둔다
   }
   render();
   if (td) td.hello();

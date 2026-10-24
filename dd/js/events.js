@@ -81,7 +81,7 @@
   function summary(s) {
     if (!s) return { tables: 0, dealers: 0, status: '시작 전' };
     const tables = (s.tables || []).filter(t => t.status === 'open').length;
-    const dealers = (s.dealers || []).filter(d => d.status !== 'off').length;
+    const dealers = (s.dealers || []).filter(d => d.status !== 'off' && d.status !== 'planned').length; // 출근해 있는 딜러 (출근 예정 제외)
     const c = s.clock || {};
     return { tables, dealers, status: !c.running ? '시작 전' : c.paused ? '일시정지' : '진행 중' };
   }

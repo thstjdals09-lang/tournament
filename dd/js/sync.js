@@ -115,6 +115,10 @@
   const sendEoReply = (dbUrl, room, dealerId, w, k) =>
     put(dbUrl, `rooms/${encodeURIComponent(room)}/eo/${encodeURIComponent(dealerId)}`, eoReply(w, k));
 
+  // 딜러 휴대폰 → 디렉터: 출근 체크 (출근 예정인 딜러만 — 보안 규칙이 p/{딜러id}/pl로 확인). at은 서버 시각
+  const sendCheckIn = (dbUrl, room, dealerId) =>
+    put(dbUrl, `rooms/${encodeURIComponent(room)}/ci/${encodeURIComponent(dealerId)}`, { at: { '.sv': 'timestamp' } });
+
   // Firebase 스트리밍 이벤트(put/patch)를 로컬 객체에 반영
   function applyEvent(obj, type, payload) {
     const parts = String(payload.path || '/').split('/').filter(Boolean);
@@ -136,8 +140,8 @@
     return obj;
   }
 
-  // 방 구독 (지금은 디렉터 PC가 휴대폰 답 eo만 받을 때 씀). onData(roomObject, {type, path}), onStatus('live' | 'reconnecting' | 'error')
-  // sub를 주면 방 안의 그 부분만 (디렉터 PC가 휴대폰 답 eo만 받을 때)
+  // 방 구독 (지금은 디렉터 PC가 휴대폰 답 eo·출근 체크 ci만 받을 때 씀). onData(roomObject, {type, path}), onStatus('live' | 'reconnecting' | 'error')
+  // sub를 주면 방 안의 그 부분만 (디렉터 PC가 휴대폰 답 eo·ci만 받을 때)
   // 휴대폰은 화면이 꺼지거나 통신망이 바뀌면 연결이 소리 없이 끊기기도 해서 직접 다시 잇는다:
   //  - 브라우저가 다시 잇지 않고 닫아 버리면(서버 오류 응답 등) 3초 뒤 새로 연결
   //  - 한동안 아무것도 안 오면 끊긴 것으로 보고 새로 연결 (방 전체는 디렉터가 30초마다 beat를 보냄)
@@ -224,12 +228,18 @@
   const LICENSED = "root.child('accounts').child(auth.uid).child('until').val() > now";
   // 방에 올릴 수 있는 사람: 방 주인, 또는 그 방을 쓰는 이벤트를 같이 쓰는 계정
   //   (같이 쓰기에서 교대 시계를 가져간 쪽도 딜러 휴대폰·TV를 갱신해야 하므로)
-  const ROOM_SHARE = "(root.child('rooms').child($room).child('share').exists() && "
-    + "root.child('shared').child(root.child('rooms').child($room).child('share').val()).child('members').child(auth.uid).val() === true)";
+  // 방 → 같이 쓰기 코드는 roomShare/{방}에 둔다 — rooms/{방}은 링크만 있으면 누구나 읽으므로 거기 두면 참가 코드가 새 나간다.
+  // 그 코드의 주인이 방 주인과 같아야 한다 (코드가 지워진 뒤 다른 계정이 같은 코드로 새로 만들어 남의 방에 쓰는 것을 막는다)
+  const SHARE_OF_ROOM = "root.child('roomShare').child($room).val()";
+  const ROOM_SHARE = `(root.child('roomShare').child($room).exists() && `
+    + `root.child('shared').child(${SHARE_OF_ROOM}).child('members').child(auth.uid).val() === true && `
+    + `root.child('shared').child(${SHARE_OF_ROOM}).child('owner').val() === root.child('rooms').child($room).child('owner').val())`;
   const OWNER = `auth != null && (root.child('rooms').child($room).child('owner').val() === auth.uid || ${ROOM_SHARE}) && ${LICENSED}`;
   const ROOM_OWNER = "auth != null && root.child('rooms').child($room).child('owner').val() === auth.uid && " + LICENSED;
   // 이벤트 같이 쓰기: 코드가 8자 이상이고, 그 코드에 들어온 계정이어야 한다
   const MEMBER = "auth != null && $code.length >= 8 && root.child('shared').child($code).child('members').child(auth.uid).val() === true && " + LICENSED;
+  // 같이 쓰기 통째로(만들기·끄기·다른 사람 빼기)는 주인만 — 들어온 계정은 머리말·내용·이름만 바꾼다 (지우기는 못 함)
+  const SHARE_OWNER = "auth != null && $code.length >= 8 && root.child('shared').child($code).child('owner').val() === auth.uid && " + LICENSED;
   const RULES = {
     rules: {
       admins: {
@@ -259,9 +269,9 @@
       // 이벤트 같이 쓰기 — 코드를 아는 DD 계정이 members에 스스로 들어온다 (딜러 방과 같은 방식)
       shared: {
         $code: {
-          // 들어온 계정만 읽고 쓴다. 처음 만들 때는 자기를 주인으로 적는 한 번만 허용
+          // 들어온 계정만 읽는다. 통째로 쓰기(지우기 포함)는 주인만, 처음 만들 때는 자기를 주인으로 적는 한 번만 허용
           '.read': MEMBER,
-          '.write': `(${MEMBER}) || (auth != null && !data.exists() && newData.child('owner').val() === auth.uid && ${LICENSED})`,
+          '.write': `(${SHARE_OWNER}) || (auth != null && !data.exists() && newData.child('owner').val() === auth.uid && ${LICENSED})`,
           // 주인은 한 번 정해지면 안 바뀐다
           owner: { '.validate': 'newData.val() === (data.exists() ? data.val() : auth.uid)' },
           members: {
@@ -273,6 +283,7 @@
           },
           // 머리말 — 2초마다 이것만 읽는다 (수십 바이트). 내용(state)은 rev가 바뀌었을 때만 받는다
           head: {
+            '.write': `${MEMBER} && newData.exists()`,
             // 쓸 때마다 정확히 +1 — 둘이 동시에 쓰면 한쪽만 통과한다 (덮어쓰기로 로테이션이 날아가지 않게)
             rev: { '.validate': 'newData.isNumber() && (!data.exists() || newData.val() === data.val() + 1)' },
             by: { '.validate': 'newData.isString() && newData.val().length <= 60' },
@@ -287,10 +298,19 @@
             },
             $other: { '.validate': false },
           },
-          state: { '.validate': 'newData.isString() && newData.val().length <= 2000000' },
-          name: { '.validate': 'newData.isString() && newData.val().length <= 60' },
+          state: { '.write': `${MEMBER} && newData.exists()`, '.validate': 'newData.isString() && newData.val().length <= 2000000' },
+          name: { '.write': `${MEMBER} && newData.exists()`, '.validate': 'newData.isString() && newData.val().length <= 60' },
           at: { '.validate': 'newData.isNumber()' },
+          // 딜러 QR 방 — 들어온 계정도 새 방을 만들지 않고 이 방을 같이 쓴다 (주인이 적는다)
+          room: { '.validate': 'newData.isString() && newData.val().length >= 16 && newData.val().length <= 40' },
           $other: { '.validate': false },
+        },
+      },
+      // 방 → 같이 쓰기 코드 (규칙만 읽는다 — 아무도 읽을 수 없다). 방 주인만 적는다
+      roomShare: {
+        $room: {
+          '.write': `auth != null && root.child('rooms').child($room).child('owner').val() === auth.uid && ${LICENSED}`,
+          '.validate': 'newData.isString() && newData.val().length >= 8 && newData.val().length <= 20',
         },
       },
       rooms: {
@@ -300,11 +320,8 @@
           owner: {
             '.write': `auth != null && newData.val() === auth.uid && ${LICENSED} && (!data.exists() || ${ADMIN})`,
           },
-          // 이 방을 쓰는 이벤트의 같이 쓰기 코드 (방 주인만 적는다)
-          share: {
-            '.write': ROOM_OWNER,
-            '.validate': 'newData.isString() && newData.val().length >= 8 && newData.val().length <= 20',
-          },
+          // 예전에 여기 적던 같이 쓰기 코드 — 누구나 읽을 수 있는 자리라 이제 roomShare로 옮겼다. 방 주인이 지우기만 한다
+          share: { '.write': ROOM_OWNER + ' && !newData.exists()' },
           // 휴대폰·TV용 (phoneview.js): 딜러별 p, 이름 목록, 전체 표, '바뀌었나' 확인 {v, at}
           p: { '.write': OWNER },
           names: { '.write': OWNER },
@@ -324,6 +341,16 @@
               '.validate': "$dealer.matches(/^d[0-9]+$/) && $dealer.length <= 8 && newData.hasChildren(['w', 'k', 'at'])",
               w: { '.validate': 'newData.isBoolean()' },
               k: { '.validate': 'newData.isString() && newData.val().length <= 20' },
+              at: { '.validate': 'newData.isNumber() && newData.val() <= now' },
+              $other: { '.validate': false },
+            },
+          },
+          // 출근 체크: 지금 출근 예정인 딜러(p/{딜러id}/pl = 1)만, 서버 시각 하나로만 (로그인 없이)
+          ci: {
+            '.write': OWNER,
+            $dealer: {
+              '.write': "root.child('rooms').child($room).child('p').child($dealer).child('pl').val() === 1",
+              '.validate': "$dealer.matches(/^d[0-9]+$/) && $dealer.length <= 8 && newData.hasChildren(['at'])",
               at: { '.validate': 'newData.isNumber() && newData.val() <= now' },
               $other: { '.validate': false },
             },
@@ -354,7 +381,7 @@
   return {
     normDb, dbHost, urlOf, randomId,
     setEndpoints, signIn, signUp, refreshToken, sendPasswordReset, changePassword,
-    get, put, patch, eoReply, sendEoReply, applyEvent, subscribe, RULES, explainError,
+    get, put, patch, eoReply, sendEoReply, sendCheckIn, applyEvent, subscribe, RULES, explainError,
     shareCode, normCode, codeText,
   };
 });
