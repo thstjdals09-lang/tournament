@@ -1171,6 +1171,7 @@
 
   // 퇴근 희망 표시: 희망(순번) / 휴대폰 답변 대기 / 물어봤더니 계속 근무
   const eoTags = d => [
+    d.leaveOnRest && '<span class="tag warn" title="쉬러 나오면 퇴근 (예약)">쉬면 퇴근</span>',
     d.earlyOut && `<span class="tag info">퇴근 희망 ${eoNo(d.id)}번</span>`,
     d.eoAsk && '<span class="tag warn">답변 대기</span>',
     d.eoStay && '<span class="tag">계속 근무</span>',
@@ -1753,6 +1754,13 @@
         toast(`출근: ${names.join(', ')} (예정 시각${state.settings.autoArrive ? ' — 체크 없이 자동. 안 왔으면 명단에서 눌러 출근 시간 변경' : ' — 출근 체크함'})`);
       }
       if (!state.button) commit(E.drawButton(state, Date.now(), Math.random())); // 오늘 버튼 (이벤트마다 한 번)
+      // '쉬러 나오면 퇴근' 예약 — 교대 밖에서(업무 끝·지금 교체 등) 쉬게 된 딜러도 바로 퇴근
+      const left = E.leaveRested(state, now);
+      if (left !== state) {
+        const names = state.dealers.filter(d => d.leaveOnRest && E.dealerOf(left, d.id).status === 'off').map(d => d.name);
+        commit(left);
+        toast(`퇴근: ${names.join(', ')} — 쉬러 나와서 (예약)`);
+      }
     }
     // 같이 쓰는 중이면 교대·예고 음성은 시계를 든 PC에서만 (두 번 교대·겹치는 안내를 막는다)
     if (!isBoard && !isMe && iRunClock() && c.running && !c.paused && c.nextPushAt != null) {
@@ -2014,6 +2022,18 @@
       }
       case 'hold':
         if (d) commit(E.toggleHold(state, id, Date.now()), `${d.name} ${d.hold ? '보류 해제' : '투입 보류'}`);
+        break;
+      case 'leave-rest':
+        if (d) {
+          const on = !d.leaveOnRest;
+          commit(E.setLeaveOnRest(state, d.id, on, Date.now()), `${d.name} ${on ? '쉬러 나오면 퇴근' : '퇴근 예약 취소'}`);
+          if (on) {
+            const p = projection().find(x => x.a[d.id] === undefined);
+            toast(`${d.name} — 쉬러 나오면 퇴근${p ? ` (${hhmm(p.at)} 교대 예정)` : ''}`, true);
+          } else {
+            toast(`${d.name} 퇴근 예약 취소`, true);
+          }
+        }
         break;
       case 'home':
         if (d && confirm(`${d.name} 퇴근 처리할까요?`)) {
@@ -2425,8 +2445,8 @@
         : `<button type="button" class="mini" data-act="arrive" data-id="${d.id}" title="${d.planAt != null && d.planAt > now
           ? `출근 체크 — ${hhmm(d.planAt)}부터 투입` : '지금 출근'}">출근</button>`);
     }).join('');
-    const onHtml = on.map(d => (d.status === 'working' ? chip(d, 'work', `${tno(d)}번`)
-      : d.status === 'duty' ? chip(d, 'duty', esc(d.task || '업무'))
+    const onHtml = on.map(d => (d.status === 'working' ? chip(d, 'work', `${tno(d)}번${d.leaveOnRest ? ' · 쉬면 퇴근' : ''}`)
+      : d.status === 'duty' ? chip(d, 'duty', `${esc(d.task || '업무')}${d.leaveOnRest ? ' · 쉬면 퇴근' : ''}`)
         : chip(d, `rest${d.hold ? ' held' : ''}`, d.hold ? '보류' : `휴식 ${minutes(E.restedMs(d, now))}분`))).join('');
     const wait = E.rosterView(state).filter(r => r.state === 'none' || r.state === 'off');
     const waitHtml = wait.map(r => (r.state === 'off'
@@ -2491,7 +2511,12 @@
         items.push(item('duty-open', '다른 업무', `${d.status === 'working' ? '테이블에서 빼고 ' : ''}칩 정리·등록 등 — 로테에 들어간 것처럼 근무로 계산`));
       }
       if (d.status === 'break') items.push(item('hold', d.hold ? '보류 해제' : '투입 보류', d.hold ? '다시 자동으로 투입' : '자동으로 투입하지 않음 (식사·개인 사정)'));
-      items.push(item('eo-open', '퇴근 희망', '표시하거나 휴대폰으로 묻기'), item('home', '퇴근', '퇴근 처리', 'danger'));
+      if (d.status !== 'break') {
+        items.push(d.leaveOnRest
+          ? item('leave-rest', '퇴근 예약 취소', '쉬러 나와도 퇴근하지 않고 계속 로테이션')
+          : item('leave-rest', '쉬러 나오면 퇴근', '교대로 쉬러 나오는 그 교대에 퇴근 (예정 표에도 보임)'));
+      }
+      items.push(item('eo-open', '퇴근 희망', '표시하거나 휴대폰으로 묻기'), item('home', '퇴근', '지금 바로 퇴근 처리', 'danger'));
     }
     $('tableTitle').innerHTML = `${esc(d.name)} <span class="grade">${esc(d.grade)}</span> <span class="muted">${esc(where)}</span>`;
     $('tableBody').innerHTML = `<div class="menu">${items.join('')}</div>`;
@@ -2575,13 +2600,16 @@
     const r = CMD.parse(text, state, Date.now());
     cmdText = text;
     const li = (cls, x) => `<li class="${cls}">${esc(x)}</li>`;
-    const examples = `<p class="hint">이렇게 말하면 됩니다 (여러 개는 쉼표로): ${r.examples.map(x => `<code>${esc(x)}</code>`).join(' ')}</p>`;
-    $('tableTitle').textContent = !text ? '명령 예시' : r.steps.length ? '이렇게 할까요?' : '알아듣지 못했습니다';
+    const codes = list => list.map(x => `<code>${esc(x)}</code>`).join(' ');
+    const examples = `<p class="hint">시키기 (여러 개는 쉼표로): ${codes(r.examples)}</p>
+      <p class="hint">물어보기 (답만 보여 주고 아무것도 바꾸지 않음): ${codes(r.questions)}</p>`;
+    $('tableTitle').textContent = !text ? '명령 예시' : r.steps.length ? '이렇게 할까요?' : r.answers.length ? '답' : '알아듣지 못했습니다';
     $('tableBody').innerHTML = `${text ? `<p class="muted cmd-said">“${esc(text)}”</p>` : ''}
+      ${r.answers.length ? `<ul class="cmd-list ans">${r.answers.map(x => `<li class="ans">${r.answers.length > 1 ? `<small>${esc(x.q)}</small><br>` : ''}${esc(x.a).split('\n').join('<br>')}</li>`).join('')}</ul>` : ''}
       ${r.steps.length ? `<ul class="cmd-list ok">${r.steps.map(x => li('ok', x.desc)).join('')}</ul>` : ''}
       ${r.notes.length ? `<ul class="cmd-list note">${r.notes.map(x => li('note', x)).join('')}</ul>` : ''}
       ${r.problems.length ? `<ul class="cmd-list bad">${r.problems.map(x => li('bad', x)).join('')}</ul>` : ''}
-      ${!text || r.problems.length || !r.steps.length ? examples : ''}
+      ${!text || r.problems.length || (!r.steps.length && !r.answers.length) ? examples : ''}
       ${r.steps.length ? '<div class="dialog-actions"><button type="button" class="primary" data-act="cmd-run">실행</button></div>' : ''}`;
     $('dlgTable').showModal();
   }

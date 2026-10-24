@@ -98,6 +98,7 @@
       inBase: null,    // 이번에 출근할 때의 누적 시간 {w, r, d} — '출근 시간 변경'으로 출근 전으로 되돌릴 때
       checkAt: null,   // 출근 체크한 시각 (출근 QR 또는 디렉터) — 예정 시각 전에 체크하면 예정 시각에 투입
       ciAt: null,      // 마지막으로 반영한 휴대폰 출근 체크의 서버 시각 (같은 체크를 두 번 반영하지 않게)
+      leaveOnRest: false, // 퇴근 예약 — 쉬러 나오면(교대로 휴식이 되면) 퇴근
       turn: 0,         // 줄 순번 — 같은 교대에 앉은(쉬러 간) 사람끼리는 먼저 줄 선 사람이 먼저 (queueUp)
     }, d));
     const ip = s.clock.intervalPlan;
@@ -963,10 +964,8 @@
     return n;
   }
 
-  function sendHome(s, dealerId, now) {
-    const n = draft(s);
-    const d = dealerOf(n, dealerId);
-    if (!d || !present(d)) return s;
+  // 퇴근 처리 (draft 안에서) — sendHome과 '쉬러 나오면 퇴근' 예약이 같이 쓴다
+  function goHome(n, d, now, why) {
     if (d.status === 'working') release(n, d, now);
     finishDuty(n, d, now);
     endBreak(n, d, now);
@@ -975,10 +974,41 @@
     d.holdMs = 0;
     d.holdAt = null;
     d.eoAsk = null;
+    d.leaveOnRest = false;
     d.checkOutAt = now;
     const last = d.sessions[d.sessions.length - 1];
     if (last && last.out == null) last.out = now;
-    addLog(n, now, 'dealer', `${d.name} 퇴근`);
+    addLog(n, now, 'dealer', `${d.name} 퇴근${why ? ` (${why})` : ''}`);
+  }
+
+  function sendHome(s, dealerId, now) {
+    const n = draft(s);
+    const d = dealerOf(n, dealerId);
+    if (!d || !present(d)) return s;
+    goHome(n, d, now);
+    fillVacancies(n, now);
+    return n;
+  }
+
+  // ---------- 쉬러 나오면 퇴근 (예약) ----------
+  // d.leaveOnRest — 교대로 쉬러 나오는 순간(또는 업무가 끝나 휴식이 되는 순간) 퇴근 처리한다. 지금 쉬는 중이면 바로 퇴근.
+  // (2026-10-24 사용자 요청 — 명령 '김민준이 로테에서 나와서 휴식이면 퇴근시켜줘'). 교대에서는 executePush가, 그 밖에는 1초 박자가
+  // leaveRested로 처리한다. 미리보기도 같은 길이라 표·휴대폰에 그 교대부터 '퇴근'으로 보인다
+  function setLeaveOnRest(s, dealerId, on, now) {
+    const d0 = dealerOf(s, dealerId);
+    if (!d0 || !present(d0) || !!d0.leaveOnRest === !!on) return s;
+    const n = draft(s);
+    const d = dealerOf(n, dealerId);
+    d.leaveOnRest = !!on;
+    addLog(n, now, 'dealer', on ? `[예약] ${d.name} — 쉬러 나오면 퇴근` : `[예약] ${d.name} 퇴근 예약 취소`);
+    return on ? leaveRested(n, now) : n;
+  }
+
+  function leaveRested(s, now) {
+    const due = s.dealers.filter(d => d.leaveOnRest && d.status === 'break');
+    if (!due.length) return s;
+    const n = draft(s);
+    for (const d0 of due) goHome(n, dealerOf(n, d0.id), now, '쉬러 나와서 — 예약');
     fillVacancies(n, now);
     return n;
   }
@@ -987,7 +1017,7 @@
     const n = draft(s);
     const d = dealerOf(n, dealerId);
     if (!d || d.status !== 'off') return s;
-    Object.assign(d, { status: 'break', since: now, streakMs: 0, checkOutAt: null, earlyOut: false, eoAsk: null, eoStay: false, hold: false, holdMs: 0, holdAt: null, planAt: null, inBase: baseOf(d) });
+    Object.assign(d, { status: 'break', since: now, streakMs: 0, checkOutAt: null, earlyOut: false, eoAsk: null, eoStay: false, hold: false, holdMs: 0, holdAt: null, planAt: null, inBase: baseOf(d), leaveOnRest: false });
     d.sessions.push({ in: now, out: null });
     queueUp(n, d);
     addLog(n, now, 'dealer', `${d.name} 복귀`);
@@ -1379,6 +1409,105 @@
       last.a[q.id] = t.no;
     }
     addLog(n, now, 'manual', `[바로잡기] ${t.no}번: ${p.name} 대신 ${q.name}이(가) 앉아 있었음 — ${Math.round(dt / MIN)}분을 ${q.name} 근무, ${p.name} 휴식으로`);
+    return n;
+  }
+
+  // ---------- 교대 때 딜러가 다른 테이블로 잘못 갔을 때 (실제 앉은 대로 고치기) ----------
+  // 2026-10-24 사용자 요청: 명령 '김민수가 5번을 잘못 바꿔줬어' → 로테를 실제대로 고친다. 마지막 교대 기록(표의 지난 칸)도.
+  // 시간은 '지금'이 아니라 그 교대 시각 기준 — 앉은 시간·쉰 시간이 실제와 같게 (바로잡기 fixSeat는 테이블 하나씩이라 이 경우를 못 맞춘다)
+  //  x가 그 교대에 M번(y 대신)에 들어가기로 했는데 실제로는 N번에 앉았다:
+  //   'swap'  N번에도 같은 교대에 w가 새로 들어갔다 → 둘이 서로 바꿔 앉은 것: 테이블만 맞바꾼다 (둘 다 그 교대부터 근무 그대로)
+  //   'wrong' N번은 z가 계속 앉기로 한 자리 → x가 z를 잘못 빼 줬다: x는 그 교대부터 N번, z는 그 교대에 쉬러 나간 것으로,
+  //           y는 M번에 계속 앉아 있던 것으로(나간 적 없음 — 미투입과 같은 셈). y가 없었으면(공석이었으면) M번은 쉬는 딜러로 채운다
+  //   'enter' x는 쉬기로 했는데 N번에 들어가 z를 빼 줬다 → x는 그 교대부터 N번, z는 그 교대부터 휴식
+  function misSeatCheck(s, dealerId, tableId) {
+    const x = dealerOf(s, dealerId);
+    const tN = tableOf(s, tableId);
+    if (!x || !tN) return { why: '딜러나 테이블을 찾지 못했습니다' };
+    if (tN.status !== 'open' || tN.use === false) return { why: `${tN.no}번은 사용 중인 테이블이 아닙니다` };
+    const last = s.history[s.history.length - 1];
+    const z = tN.dealerId ? dealerOf(s, tN.dealerId) : null;
+    if (x.status === 'working') {
+      const tM = tableOf(s, x.tableId);
+      if (tM.id === tN.id) return { why: `${x.name}은(는) 화면에도 ${tN.no}번입니다 — 실제로 앉은 테이블 번호를 적어 주세요` };
+      const u = tM.undo;
+      if (!u || u.inId !== x.id || x.since !== u.seatAt) return { why: `${x.name}이(가) 방금 교대로 들어간 자리가 아닙니다 — 테이블 칸의 [바로잡기]를 쓰세요` };
+      if (z && tN.undo && tN.undo.inId === z.id && tN.undo.at === u.at && z.since === tN.undo.seatAt) return { kind: 'swap', x, z, tM, tN, u };
+      const y = u.outId ? dealerOf(s, u.outId) : null;
+      const yBack = !!(y && y.status === 'break' && y.since === u.at);
+      return { kind: 'wrong', x, z, y: yBack ? y : null, tM, tN, u, last };
+    }
+    if (x.status === 'break' && last && x.since <= last.at && z && z.since <= last.at) return { kind: 'enter', x, z, tN, last };
+    return { why: `${x.name}은(는) 지금 ${x.status === 'break' ? '휴식 중' : '근무 중이 아님'}이라 그렇게 고칠 수 없습니다 — 테이블 칸의 [바로잡기]를 쓰세요` };
+  }
+
+  function misSeat(s, dealerId, tableId, now) {
+    const c = misSeatCheck(s, dealerId, tableId);
+    if (!c.kind) return s;
+    const n = draft(s);
+    const x = dealerOf(n, c.x.id);
+    const tN = tableOf(n, c.tN.id);
+    const z = c.z ? dealerOf(n, c.z.id) : null;
+    const last = n.history[n.history.length - 1];
+    if (c.kind === 'swap') {
+      const tM = tableOf(n, c.tM.id);
+      x.tableId = tN.id;
+      z.tableId = tM.id;
+      tN.dealerId = x.id;
+      tM.dealerId = z.id;
+      // 들어간 사람 쪽 기록만 맞바꾼다 — 나간 사람은 그 테이블에서 나간 그대로 (미투입하면 그 테이블 딜러가 제자리로)
+      const uM = tM.undo;
+      const uN = tN.undo;
+      tM.undo = Object.assign({}, uM, { inId: z.id, inBefore: uN.inBefore, seatAt: z.since });
+      tN.undo = Object.assign({}, uN, { inId: x.id, inBefore: uM.inBefore, seatAt: x.since });
+      if (last && last.at === c.u.at) { last.a[x.id] = tN.no; last.a[z.id] = tM.no; }
+      addLog(n, now, 'manual', `[바로잡기] ${x.name} ↔ ${z.name} 서로 바꿔 앉음 (${tM.no}번 ↔ ${tN.no}번)`);
+      return n;
+    }
+    if (c.kind === 'enter') {
+      const at = c.last.at;
+      const zBefore = keep(z);
+      release(n, z, at);                     // z는 그 교대에 쉬러 나간 것으로 (그때까지 근무)
+      const xBefore = keep(x);
+      closeHold(x, at);
+      const rested = restedMs(x, at);
+      x.totalRestMs += rested;
+      if (rested >= n.settings.minRestMinutes * MIN) x.streakMs = 0;
+      Object.assign(x, { status: 'working', tableId: tN.id, since: at, hold: false, holdMs: 0, holdAt: null });
+      queueUp(n, x);
+      tN.dealerId = x.id;
+      tN.undo = { at, seatAt: at, inId: x.id, inBefore: xBefore, outId: z.id, outBefore: zBefore };
+      if (last && last.at === at) { last.a[x.id] = tN.no; last.a[z.id] = 0; }
+      addLog(n, now, 'manual', `[바로잡기] ${x.name}이(가) ${tN.no}번에 잘못 들어감 — ${hhmmOf(at)} 교대부터 ${x.name} 근무, ${z.name} 휴식`);
+      return n;
+    }
+    // 'wrong': x가 M번 대신 N번으로
+    const tM = tableOf(n, c.tM.id);
+    const u = c.u;
+    const at = u.at;
+    tM.dealerId = null;
+    delete tM.undo;
+    let y = null;
+    if (c.y) {                                // y는 M번에 계속 앉아 있던 것으로
+      y = dealerOf(n, c.y.id);
+      Object.assign(y, u.outBefore);
+      tM.dealerId = y.id;
+    }
+    let zBefore = null;
+    if (z) {                                  // z는 그 교대에 쉬러 나간 것으로
+      zBefore = keep(z);
+      release(n, z, at);
+    }
+    x.tableId = tN.id;                        // x는 그 교대부터 N번 (앉은 시각 그대로)
+    tN.dealerId = x.id;
+    tN.undo = { at, seatAt: x.since, inId: x.id, inBefore: u.inBefore, outId: z ? z.id : null, outBefore: zBefore };
+    if (last && last.at === at) {
+      last.a[x.id] = tN.no;
+      if (y) last.a[y.id] = tM.no;
+      if (z) last.a[z.id] = 0;
+    }
+    addLog(n, now, 'manual', `[바로잡기] ${x.name} — ${tM.no}번이 아니라 ${tN.no}번에 들어감 (${hhmmOf(at)} 교대)${z ? ` · ${z.name} 휴식` : ''}${y ? ` · ${y.name} ${tM.no}번 계속` : ` · ${tM.no}번 공석`}`);
+    if (!y) fillVacancies(n, now);
     return n;
   }
 
@@ -1886,6 +2015,7 @@
       if (c.intervalPlan && next > c.intervalPlan.at) next = c.intervalPlan.at; // 예약한 시각에 꼭 교대
       c.nextPushAt = next;
     }
+    for (const d of n.dealers) if (d.leaveOnRest && d.status === 'break') goHome(n, d, at, '쉬러 나와서 — 예약');
     record(n, at);
     n.past = []; // 딜러가 이미 움직였으므로 교대 전 작업은 되돌리지 않는다
     // 이번 교대 몫 예약은 쓰고 버리고, 나머지는 한 칸씩 당긴다
@@ -2004,6 +2134,8 @@
     closeTable,
     relieveTable,
     sendHome,
+    setLeaveOnRest,
+    leaveRested,
     checkBack,
     rosterEntries,
     addRoster,
@@ -2028,6 +2160,8 @@
     undoInfo,
     undoSeat,
     fixSeat,
+    misSeat,
+    misSeatCheck,
     toggleTableLock,
     toggleHold,
     addNotice,

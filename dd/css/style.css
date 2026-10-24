@@ -967,6 +967,8 @@ dialog .times-row label { display: inline-flex; gap: 6px; }
 .cmd-list li.ok { border-left-color: var(--accent); }
 .cmd-list li.note { border-left-color: var(--muted); color: var(--muted); }
 .cmd-list li.bad { border-left-color: var(--danger, #e5484d); }
+.cmd-list li.ans { border-left-color: var(--warn); line-height: 1.5; }
+.cmd-list li.ans small { color: var(--muted); }
 .hint code { display: inline-block; margin: 2px 2px; padding: 1px 6px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); }
 .push-every .interval-plan { margin-left: 4px; color: var(--accent); }
 @media (min-width: 1500px) {
