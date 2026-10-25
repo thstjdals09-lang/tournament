@@ -903,7 +903,7 @@
     // 디렉터 화면에서는 예정 시각 머리를 누르면 그 교대에 테이블 사용 시작·대기·깨기 (교대 때 바꾸기)
     const head = `<tr><th class="corner">${view === 'table' ? '테이블' : '딜러'}</th>${cols.map(c => {
       const n = c.cls === 'future' ? ++k : 0;
-      const pick = edit && n ? ` data-coln="${n}" title="눌러서 이 교대에 테이블 사용 시작·대기·깨기"` : '';
+      const pick = edit && n ? ` data-coln="${n}" title="눌러서 이 교대 시각 바꾸기(이번만) · 테이블 사용 시작·대기·깨기"` : '';
       return `<th class="${c.cls}${pick ? ' colpick' : ''}"${pick}>${c.at ? hhmm(c.at) : '—'}${c.sub ? `<small>${c.sub}</small>` : ''}</th>`;
     }).join('')}</tr>`;
     const body = view === 'table' ? tableRows(cols, edit) : dealerRows(cols, meId, given && given.dealers, edit);
@@ -2157,19 +2157,6 @@
         toast(`${t.no}번 테이블 — ${at ? hhmm(at) : `${n}번째`} 교대에 ${SCHED_LABEL[act]}${act === 'use' ? ' (그때 오래 쉰 딜러가 들어갑니다)' : ' (앉아 있던 딜러는 그때 휴식)'}`, true);
         break;
       }
-      case 'push-time': {
-        const n = Number(b.dataset.n);
-        const t = Number(($('pushTimeSel') || {}).value);
-        const was = (projection()[n - 1] || {}).at;
-        const next = E.setPushTime(state, n, t, Date.now());
-        if (next === state) {
-          toast('그 시각으로는 바꿀 수 없습니다 (같은 시각이거나 앞뒤 교대를 넘음)');
-          break;
-        }
-        commit(next, `${was ? hhmm(was) : `${n}번째`} 교대 시각 바꾸기`);
-        toast(`${was ? hhmm(was) : `${n}번째`} 교대 → ${hhmm(t)} (이번만 — 뒤 교대는 원래 시각대로)`, true);
-        break;
-      }
       case 'push-time-reset': {
         const n = Number(b.dataset.n);
         const next = E.clearPushTime(state, n, Date.now());
@@ -2668,19 +2655,33 @@
       const G = 5 * E.MIN;
       const list = [];
       for (let t = Math.floor(rg.prev / G) * G + G; t < rg.after; t += G) list.push(t); // prev는 엔진이 지금(멈춤이면 멈춘 시각)까지 따진다
-      timeHtml = `<div class="sched-time"><label>이 교대 시각 <select id="pushTimeSel">${list.map(t => `<option value="${t}"${t === rg.at ? ' selected' : ''}>${hhmm(t)}${t === rg.orig ? ' (원래)' : ''}</option>`).join('')}</select></label>
-        <button type="button" class="primary" data-act="push-time" data-n="${n}">바꾸기 (이번만)</button>
-        ${rg.orig !== rg.at ? `<button type="button" data-act="push-time-reset" data-n="${n}">원래대로 ${hhmm(rg.orig)}</button>` : ''}
-        <small class="muted">이 교대만 바뀌고 뒤 교대는 원래 시각대로 — 5분 눈금, 앞뒤 교대 사이</small></div>`;
+      // 고르면 바로 바뀐다 — 따로 누르는 버튼을 두었더니 고르고 닫아서 '안 바뀐다'가 됐다 (2026-10-25 사용자 제보)
+      timeHtml = `<div class="sched-time"><label>교대 시각 <select id="pushTimeSel">${list.map(t => `<option value="${t}"${t === rg.at ? ' selected' : ''}>${hhmm(t)}${t === rg.orig ? ' (원래)' : ''}</option>`).join('')}</select></label>
+        ${rg.orig !== rg.at ? `<span class="tag info">이번만</span><button type="button" data-act="push-time-reset" data-n="${n}">원래대로 ${hhmm(rg.orig)}</button>` : ''}
+        <small class="muted">고르면 바로 바뀝니다 — 이 교대만, 뒤 교대는 원래 시각대로 (5분 눈금, 앞뒤 교대 사이)</small></div>`;
     }
     $('tableTitle').innerHTML = tableId && tables[0] ? `${tchip(tables[0].no)} 교대 때 바꾸기` : `${hhmm(slots[n - 1].at)} 교대 — 시각·테이블 바꾸기`;
-    $('tableBody').innerHTML = `<label class="sched-when">언제 <select id="schedN">${opts}</select></label>
+    $('tableBody').innerHTML = `<label class="sched-when">어느 교대 <select id="schedN">${opts}</select></label>
       ${timeHtml}
       <p class="hint">테이블은 지금 바로가 아니라 고른 교대에 바뀝니다. <b>사용 시작</b>이면 그 교대에 오래 쉰 딜러가 들어가고,
       <b>대기로·깨기</b>면 앉아 있던 딜러가 그 교대에 쉽니다. 로테이션 표에 미리 보입니다.</p>
       <div class="sched-list">${rows || '<p class="empty">열린 테이블이 없습니다</p>'}</div>`;
     if (!$('dlgTable').open) $('dlgTable').showModal();
     $('schedN').onchange = () => openSched(Number($('schedN').value), tableId); // 고른 교대에 맞게 시각 목록도 다시
+    if ($('pushTimeSel')) $('pushTimeSel').onchange = () => { setPushTimeAt(n, Number($('pushTimeSel').value)); openSched(n, tableId); };
+  }
+
+  // 교대 시각 바꾸기 (이번만) — 창의 '교대 시각'을 고르면 바로
+  function setPushTimeAt(n, t) {
+    const was = (projection()[n - 1] || {}).at;
+    const next = E.setPushTime(state, n, t, Date.now());
+    if (next === state) {
+      toast('그 시각으로는 바꿀 수 없습니다 (같은 시각이거나 앞뒤 교대를 넘음)');
+      return;
+    }
+    commit(next, `${was ? hhmm(was) : `${n}번째`} 교대 시각 바꾸기`);
+    const orig = E.pushTimeChanged(state, n);
+    toast(orig ? `${was ? hhmm(was) : `${n}번째`} 교대 → ${hhmm(t)} (이번만 — 뒤 교대는 원래 시각대로)` : `교대 시각 원래대로 — ${hhmm(t)}`, true);
   }
 
   // ---------- 딜러 지정 창 ----------
