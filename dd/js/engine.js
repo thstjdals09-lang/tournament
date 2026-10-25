@@ -105,6 +105,7 @@
     if (ip && !(Number.isFinite(ip.at) && ip.at % GRID === 0 && ip.minutes >= 5 && ip.minutes <= 120)) s.clock.intervalPlan = null;
     if (s.clock.intervalPlan === undefined) s.clock.intervalPlan = null;
     if (!(Number.isFinite(s.clock.anchorAt) && s.clock.anchorAt % GRID === 0)) s.clock.anchorAt = null;
+    if (!Number.isFinite(s.clock.baseAt)) s.clock.baseAt = null; // 예전 저장분: 간격을 바꿀 때 다음 교대 - 간격으로 대신
     s.clock.timeExceptions = (Array.isArray(s.clock.timeExceptions) ? s.clock.timeExceptions : [])
       .filter(e => e && Number.isFinite(e.n) && e.n >= 2 && e.n <= PLAN_MAX && Number.isFinite(e.at) && e.at % GRID === 0);
     s.tables = s.tables.map(t => {
@@ -1864,14 +1865,19 @@
     const was = n.settings.pushMinutes;
     Object.assign(n.settings, patch);
     const every = n.settings.pushMinutes;
-    if (every !== was && n.clock.anchorAt != null) { // 이번만 바꾼 교대 시각은 원래대로 돌리고 새 간격으로
-      n.clock.nextPushAt = n.clock.anchorAt;
-      n.clock.anchorAt = null;
-    }
     if (every !== was && n.clock.running && n.clock.nextPushAt != null) {
-      const at = n.clock.nextPushAt - was * MIN + every * MIN;
-      n.clock.nextPushAt = gridAt(at, now == null ? null : clockNow(n, now)); // 이미 지난 시각이면 다음 눈금으로
-      if (now != null) addLog(n, now, 'clock', `교대 간격 ${was}분 → ${every}분 (다음 교대 ${hhmmOf(n.clock.nextPushAt)})`);
+      // 다음 교대 = 진행 중 교대 시각(baseAt — 일시정지로 밀린 만큼 포함) + 새 간격. 이번만 바꾼 다음 교대 시각은 버린다.
+      // 예전처럼 '지금 다음 교대 - 옛 간격 + 새 간격'을 반올림하면 칸의 화살표로 20→21→…→30 한 칸씩 올릴 때마다
+      // 10:41 → 10:40으로 되돌아가 다음 교대가 안 바뀌고 그다음부터 30분이 됐다 (2026-10-25 사용자 제보 "진행 중 10:20에 30분이면 10:50")
+      const c = n.clock;
+      const from = c.baseAt != null ? c.baseAt : (c.anchorAt != null ? c.anchorAt : c.nextPushAt) - was * MIN;
+      c.baseAt = from; // 예전 저장분도 한 번 정해 두면 다음에 한 칸 더 바꿀 때 반올림이 쌓이지 않는다
+      c.anchorAt = null;
+      let next = gridAt(from + every * MIN, now == null ? null : clockNow(n, now)); // 이미 지난 시각이면 다음 눈금으로
+      const ip = c.intervalPlan; // 간격 예약 시각이 아직 안 지났으면 그 시각을 넘지 않게
+      if (ip && next > ip.at && (now == null || ip.at > clockNow(n, now))) next = ip.at;
+      c.nextPushAt = next;
+      if (now != null) addLog(n, now, 'clock', `교대 간격 ${was}분 → ${every}분 (다음 교대 ${hhmmOf(c.nextPushAt)})`);
     }
     return n;
   }
@@ -1956,7 +1962,8 @@
       d.since = at;
       d.streakMs = 0;
     }
-    n.clock = { running: true, paused: false, pausedAt: null, nextPushAt: gridAt(at + n.settings.pushMinutes * MIN, at) };
+    // baseAt = 진행 중 교대의 기준 시각 — 간격을 바꾸면 다음 교대 = baseAt + 새 간격
+    n.clock = { running: true, paused: false, pausedAt: null, nextPushAt: gridAt(at + n.settings.pushMinutes * MIN, at), baseAt: at };
     fillVacancies(n, at);
     record(n, at);
     addLog(n, at, 'clock', '로테이션 시작');
@@ -2010,6 +2017,7 @@
     const p = n.clock.pausedAt;
     n.clock.nextPushAt = gridAt(n.clock.nextPushAt + (now - p), now);
     if (n.clock.anchorAt != null) n.clock.anchorAt = gridAt(n.clock.anchorAt + (now - p), now);
+    if (n.clock.baseAt != null) n.clock.baseAt += now - p; // 진행 중 교대의 기준도 멈춘 만큼 (간격을 바꿀 때 씀)
     const ip = n.clock.intervalPlan; // 간격 예약 시각이 아직 안 지났으면 그 시각에 꼭 교대
     if (ip && n.clock.nextPushAt > ip.at && ip.at > now) n.clock.nextPushAt = ip.at;
     for (const d of n.dealers.filter(busy)) d.since = now - Math.max(0, p - d.since);
@@ -2071,7 +2079,8 @@
       // 이번 교대가 '이번만 바꾼 시각'이었으면 다음 교대는 원래 시각(anchorAt) 기준 — 뒤 교대는 원래 눈금대로
       const base = inTime && c.anchorAt != null ? c.anchorAt : c.nextPushAt;
       c.anchorAt = null;
-      let next = gridAt((inTime ? base : at) + pushMs, at); // 정시 교대는 시간 격자 유지
+      c.baseAt = inTime ? base : at; // 이 교대 구간의 기준 (간격을 바꾸면 여기에 새 간격을 더한다)
+      let next = gridAt(c.baseAt + pushMs, at); // 정시 교대는 시간 격자 유지
       if (c.intervalPlan && next > c.intervalPlan.at) next = c.intervalPlan.at; // 예약한 시각에 꼭 교대
       // 시각 예외는 한 칸씩 당긴다. 다음 교대(n = 1)가 예외면 그 시각으로 (그 사이 시각이 지나 맞지 않게 됐으면 버린다)
       const ex = (c.timeExceptions || []).map(e => ({ n: e.n - 1, at: e.at })).filter(e => e.n >= 1 && e.at > at);
