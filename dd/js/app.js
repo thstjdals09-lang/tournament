@@ -826,7 +826,7 @@
       .map(h => ({ at: h.at, cls: 'past', sub: '', a: h.a }));
     const cur = hist[hist.length - 1];
     cols.push({ at: cur ? cur.at : null, cls: 'now', sub: state.clock.running ? '진행 중' : '현재', a: E.snapshot(state) });
-    projection().forEach(p => cols.push({ at: p.at, cls: 'future', sub: '예정', a: p.a }));
+    projection().forEach((p, i) => cols.push({ at: p.at, cls: 'future', sub: E.pushTimeChanged(state, i + 1) ? '이번만' : '예정', a: p.a }));
     return cols;
   }
 
@@ -2157,6 +2157,28 @@
         toast(`${t.no}번 테이블 — ${at ? hhmm(at) : `${n}번째`} 교대에 ${SCHED_LABEL[act]}${act === 'use' ? ' (그때 오래 쉰 딜러가 들어갑니다)' : ' (앉아 있던 딜러는 그때 휴식)'}`, true);
         break;
       }
+      case 'push-time': {
+        const n = Number(b.dataset.n);
+        const t = Number(($('pushTimeSel') || {}).value);
+        const was = (projection()[n - 1] || {}).at;
+        const next = E.setPushTime(state, n, t, Date.now());
+        if (next === state) {
+          toast('그 시각으로는 바꿀 수 없습니다 (같은 시각이거나 앞뒤 교대를 넘음)');
+          break;
+        }
+        commit(next, `${was ? hhmm(was) : `${n}번째`} 교대 시각 바꾸기`);
+        toast(`${was ? hhmm(was) : `${n}번째`} 교대 → ${hhmm(t)} (이번만 — 뒤 교대는 원래 시각대로)`, true);
+        break;
+      }
+      case 'push-time-reset': {
+        const n = Number(b.dataset.n);
+        const next = E.clearPushTime(state, n, Date.now());
+        if (next !== state) {
+          commit(next, '교대 시각 원래대로');
+          toast(`교대 시각 원래대로 — ${hhmm(projection()[n - 1].at)}`, true);
+        }
+        break;
+      }
       case 'tsched-cancel':
         if (t) commit(E.unscheduleTable(state, t.id, Date.now()), `${t.no}번 예약 취소`);
         break;
@@ -2639,12 +2661,26 @@
       const has = t.sched ? `<span class="tag info">예약 · ${esc(schedText(t))}</span><button type="button" class="mini" data-act="tsched-cancel" data-id="${t.id}">예약 취소</button>` : '';
       return `<div class="sched-row">${tchip(t.no)}<span class="muted">${now}</span>${has}<span class="acts">${acts}</span></div>`;
     }).join('');
-    $('tableTitle').innerHTML = tableId && tables[0] ? `${tchip(tables[0].no)} 교대 때 바꾸기` : '교대 때 테이블 바꾸기';
-    $('tableBody').innerHTML = `<p class="hint">지금 바로가 아니라 고른 교대에 바뀝니다. <b>사용 시작</b>이면 그 교대에 오래 쉰 딜러가 들어가고,
+    // 교대 시각 바꾸기 (이번만) — 앞 교대와 뒤 교대 사이의 5분 눈금 (2026-10-25 사용자 요청: 표 머리 시각을 눌러 '예외로')
+    let timeHtml = '';
+    const rg = !tableId ? E.pushTimeRange(state, n, Date.now()) : null;
+    if (rg) {
+      const G = 5 * E.MIN;
+      const list = [];
+      for (let t = Math.floor(rg.prev / G) * G + G; t < rg.after; t += G) list.push(t); // prev는 엔진이 지금(멈춤이면 멈춘 시각)까지 따진다
+      timeHtml = `<div class="sched-time"><label>이 교대 시각 <select id="pushTimeSel">${list.map(t => `<option value="${t}"${t === rg.at ? ' selected' : ''}>${hhmm(t)}${t === rg.orig ? ' (원래)' : ''}</option>`).join('')}</select></label>
+        <button type="button" class="primary" data-act="push-time" data-n="${n}">바꾸기 (이번만)</button>
+        ${rg.orig !== rg.at ? `<button type="button" data-act="push-time-reset" data-n="${n}">원래대로 ${hhmm(rg.orig)}</button>` : ''}
+        <small class="muted">이 교대만 바뀌고 뒤 교대는 원래 시각대로 — 5분 눈금, 앞뒤 교대 사이</small></div>`;
+    }
+    $('tableTitle').innerHTML = tableId && tables[0] ? `${tchip(tables[0].no)} 교대 때 바꾸기` : `${hhmm(slots[n - 1].at)} 교대 — 시각·테이블 바꾸기`;
+    $('tableBody').innerHTML = `<label class="sched-when">언제 <select id="schedN">${opts}</select></label>
+      ${timeHtml}
+      <p class="hint">테이블은 지금 바로가 아니라 고른 교대에 바뀝니다. <b>사용 시작</b>이면 그 교대에 오래 쉰 딜러가 들어가고,
       <b>대기로·깨기</b>면 앉아 있던 딜러가 그 교대에 쉽니다. 로테이션 표에 미리 보입니다.</p>
-      <label class="sched-when">언제 <select id="schedN">${opts}</select></label>
       <div class="sched-list">${rows || '<p class="empty">열린 테이블이 없습니다</p>'}</div>`;
-    $('dlgTable').showModal();
+    if (!$('dlgTable').open) $('dlgTable').showModal();
+    $('schedN').onchange = () => openSched(Number($('schedN').value), tableId); // 고른 교대에 맞게 시각 목록도 다시
   }
 
   // ---------- 딜러 지정 창 ----------
@@ -2878,8 +2914,8 @@
     const n = Number(td.dataset.n);
     const rest = td.classList.contains('rest');
     if (td.dataset.d === pick.id) {
-      // 같은 딜러의 다른 시각 — 휴식을 다른 교대로 옮기는 것만 뜻이 통한다
-      return pick.rest && !rest && pick.n >= 1 && n >= 1 && n !== pick.n;
+      // 같은 딜러의 다른 시각(좌우) — 휴식을 다른 교대로 옮긴다. 휴식 칸 → 테이블 칸이든 테이블 칸 → 휴식 칸이든 같다 (2026-10-25)
+      return pick.rest !== rest && pick.n >= 1 && n >= 1 && n !== pick.n;
     }
     if (n !== pick.n) return false;      // 다른 딜러 + 다른 시각은 무슨 뜻인지 알 수 없다
     // 휴식끼리는 바꿀 게 없다. 예정 칸의 '테이블 ↔ 테이블'은 그 교대에 두 사람의 테이블 맞바꿈 (2026-10-24 사용자 요청)
@@ -2943,6 +2979,11 @@
       const a = from.rest ? from.id : id;
       const b = from.rest ? id : from.id;
       commit(E.planSwap(state, n, a, b, now), `${nameOf(b)}에게 휴식 넘김`);
+      // 같은 두 사람을 다시 놓으면 예약이 지워진다 (켜고 끄기) — 그때는 '원래대로'라고 알린다
+      if (!(state.plans || []).some(x => x.n === n && x.type === 'swap')) {
+        toast(`${when} — 직접 정한 휴식 넘기기를 취소했습니다 (원래대로)`, true);
+        return;
+      }
       // 앉아 있던 사람은 테이블을 옮기지 않으므로 끌어온 사람이 꼭 그 자리로 가지는 않는다 → 결과를 그대로 알려 준다
       const p = (projection()[n - 1] || { a: {} }).a;
       if (p[b] !== 0) {
@@ -2951,8 +2992,12 @@
         toast(`${when} — ${nameOf(b)} 휴식, ${nameOf(a)} ${p[a] ? `${p[a]}번` : '휴식'}${warn(b)}`, true);
       }
     } else {
-      commit(E.planMoveRest(state, from.n, n, from.id, now), `${nameOf(from.id)} 휴식 옮김`);
-      toast(`${nameOf(from.id)}의 휴식을 ${when}로 옮겼습니다${warn(from.id)}`, true);
+      // 좌우: 쉬는 칸의 교대에서 앉은 칸의 교대로 휴식을 옮긴다 (어느 쪽을 끌었든 같다)
+      const restN = from.rest ? from.n : n;
+      const toN = from.rest ? n : from.n;
+      const toAt = (projection()[toN - 1] || {}).at;
+      commit(E.planMoveRest(state, restN, toN, from.id, now), `${nameOf(from.id)} 휴식 옮김`);
+      toast(`${nameOf(from.id)}의 휴식을 ${toAt ? `${hhmm(toAt)} 교대` : `${toN}번째 교대`}로 옮겼습니다${warn(from.id)}`, true);
     }
   }
 

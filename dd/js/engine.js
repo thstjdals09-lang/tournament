@@ -104,6 +104,9 @@
     const ip = s.clock.intervalPlan;
     if (ip && !(Number.isFinite(ip.at) && ip.at % GRID === 0 && ip.minutes >= 5 && ip.minutes <= 120)) s.clock.intervalPlan = null;
     if (s.clock.intervalPlan === undefined) s.clock.intervalPlan = null;
+    if (!(Number.isFinite(s.clock.anchorAt) && s.clock.anchorAt % GRID === 0)) s.clock.anchorAt = null;
+    s.clock.timeExceptions = (Array.isArray(s.clock.timeExceptions) ? s.clock.timeExceptions : [])
+      .filter(e => e && Number.isFinite(e.n) && e.n >= 2 && e.n <= PLAN_MAX && Number.isFinite(e.at) && e.at % GRID === 0);
     s.tables = s.tables.map(t => {
       const x = Object.assign({ locked: false, use: true }, t); // 예전 테이블은 모두 사용 중
       if (x.sched && !(x.status === 'open' && x.sched && okN(x.sched.n) && SCHED_ACTS.includes(x.sched.act))) delete x.sched;
@@ -1861,6 +1864,10 @@
     const was = n.settings.pushMinutes;
     Object.assign(n.settings, patch);
     const every = n.settings.pushMinutes;
+    if (every !== was && n.clock.anchorAt != null) { // 이번만 바꾼 교대 시각은 원래대로 돌리고 새 간격으로
+      n.clock.nextPushAt = n.clock.anchorAt;
+      n.clock.anchorAt = null;
+    }
     if (every !== was && n.clock.running && n.clock.nextPushAt != null) {
       const at = n.clock.nextPushAt - was * MIN + every * MIN;
       n.clock.nextPushAt = gridAt(at, now == null ? null : clockNow(n, now)); // 이미 지난 시각이면 다음 눈금으로
@@ -1892,6 +1899,55 @@
     n.clock.intervalPlan = null;
     return n;
   }
+
+  // ---------- 교대 시각 바꾸기 (이번만) ----------
+  // 앞으로 n번째 교대 하나만 다른 시각(5분 눈금)에 — 그 뒤 교대는 원래 시각대로 (2026-10-25 사용자 요청: 표 머리 시각을 눌러 '예외로').
+  // clock.nextPushAt은 늘 '실제 다음 교대 시각'이다 (타이머·휴대폰·미리보기가 그대로 쓴다).
+  //  n = 1: nextPushAt을 바로 바꾸고 원래 시각을 clock.anchorAt에 둔다 → 그 교대 뒤 다음 교대는 원래 시각 기준
+  //  n ≥ 2: clock.timeExceptions = [{n, at}]에 두었다가 교대마다 n을 줄이고, 1이 되면 위와 같이
+  //  앞 교대와 뒤 교대 사이로만 (지금 예정 표 기준). 원래 시각을 고르면 예외를 지운다
+  function pushTimeRange(s, n, now) {
+    if (!s.clock.running || !okN(n)) return null;
+    const cols = project(s, n + 1, now);
+    if (cols.length < n) return null;
+    const last = s.history.length ? s.history[s.history.length - 1].at : -Infinity;
+    const prev = n === 1 ? Math.max(last, clockNow(s, now)) : cols[n - 2].at;
+    const after = cols[n] ? cols[n].at : cols[n - 1].at + s.settings.pushMinutes * MIN;
+    let orig = cols[n - 1].at; // 원래 시각 (예외를 뺀 예정 표에서)
+    if (n === 1) orig = s.clock.anchorAt != null ? s.clock.anchorAt : s.clock.nextPushAt;
+    else if ((s.clock.timeExceptions || []).some(e => e.n === n)) {
+      const plain = Object.assign({}, s, { clock: Object.assign({}, s.clock, { timeExceptions: s.clock.timeExceptions.filter(e => e.n !== n) }) });
+      orig = project(plain, n, now)[n - 1].at;
+    }
+    return { at: cols[n - 1].at, prev, after, orig };
+  }
+
+  function setPushTime(s, n, at, now) {
+    const r = pushTimeRange(s, n, now);
+    const t = Math.round(at / GRID) * GRID;
+    if (!r || !(t > r.prev && t < r.after) || t === r.at) return s;
+    const d = draft(s);
+    const c = d.clock;
+    if (n === 1) {
+      const orig = c.anchorAt != null ? c.anchorAt : c.nextPushAt;
+      c.nextPushAt = t;
+      c.anchorAt = t === orig ? null : orig;
+    } else {
+      c.timeExceptions = (c.timeExceptions || []).filter(e => e.n !== n);
+      if (t !== r.orig) c.timeExceptions.push({ n, at: t });
+    }
+    addLog(d, now, 'clock', `${n}번째 교대 시각 ${hhmmOf(r.at)} → ${hhmmOf(t)} (이번만 — 뒤 교대는 원래 시각대로)`);
+    return d;
+  }
+
+  // 원래 시각으로 (이번만 바꾼 것 취소)
+  function clearPushTime(s, n, now) {
+    const r = pushTimeRange(s, n, now);
+    return r && r.orig !== r.at ? setPushTime(s, n, r.orig, now) : s;
+  }
+
+  // 이번만 바꾼 교대 시각인가 (표 머리 표시용)
+  const pushTimeChanged = (s, n) => (n === 1 ? s.clock.anchorAt != null : (s.clock.timeExceptions || []).some(e => e.n === n));
 
   function startClock(s, now) {
     const at = floorGrid(now); // 시작 시각도 5분 눈금으로 내린다 — 표의 '진행 중' 칸까지 눈금에 맞게
@@ -1953,6 +2009,7 @@
     const n = draft(s);
     const p = n.clock.pausedAt;
     n.clock.nextPushAt = gridAt(n.clock.nextPushAt + (now - p), now);
+    if (n.clock.anchorAt != null) n.clock.anchorAt = gridAt(n.clock.anchorAt + (now - p), now);
     const ip = n.clock.intervalPlan; // 간격 예약 시각이 아직 안 지났으면 그 시각에 꼭 교대
     if (ip && n.clock.nextPushAt > ip.at && ip.at > now) n.clock.nextPushAt = ip.at;
     for (const d of n.dealers.filter(busy)) d.since = now - Math.max(0, p - d.since);
@@ -2011,8 +2068,19 @@
       }
       const pushMs = n.settings.pushMinutes * MIN;
       const inTime = c.nextPushAt != null && at >= c.nextPushAt && at - c.nextPushAt < pushMs;
-      let next = gridAt((inTime ? c.nextPushAt : at) + pushMs, at); // 정시 교대는 시간 격자 유지
+      // 이번 교대가 '이번만 바꾼 시각'이었으면 다음 교대는 원래 시각(anchorAt) 기준 — 뒤 교대는 원래 눈금대로
+      const base = inTime && c.anchorAt != null ? c.anchorAt : c.nextPushAt;
+      c.anchorAt = null;
+      let next = gridAt((inTime ? base : at) + pushMs, at); // 정시 교대는 시간 격자 유지
       if (c.intervalPlan && next > c.intervalPlan.at) next = c.intervalPlan.at; // 예약한 시각에 꼭 교대
+      // 시각 예외는 한 칸씩 당긴다. 다음 교대(n = 1)가 예외면 그 시각으로 (그 사이 시각이 지나 맞지 않게 됐으면 버린다)
+      const ex = (c.timeExceptions || []).map(e => ({ n: e.n - 1, at: e.at })).filter(e => e.n >= 1 && e.at > at);
+      const mine = ex.find(e => e.n === 1);
+      if (mine && mine.at < next + pushMs) {
+        c.anchorAt = next;
+        next = mine.at;
+      }
+      c.timeExceptions = ex.filter(e => e.n >= 2);
       c.nextPushAt = next;
     }
     for (const d of n.dealers) if (d.leaveOnRest && d.status === 'break') goHome(n, d, at, '쉬러 나와서 — 예약');
@@ -2179,6 +2247,10 @@
     revert,
     updateSettings,
     scheduleInterval,
+    setPushTime,
+    clearPushTime,
+    pushTimeRange,
+    pushTimeChanged,
     cancelIntervalPlan,
     startClock,
     startClockAt,

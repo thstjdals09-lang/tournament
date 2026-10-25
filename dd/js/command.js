@@ -22,7 +22,7 @@
   };
 
   const EXAMPLES = ['3시부터 15분 간격', '1시에 7번 열어', '7-9번 1시 사용', '2번 1시 깨기', '3번 2시 대기',
-    '김민수 6시 출근', '김민수 쉬러 나오면 퇴근', '김민수 퇴근', '김민수가 5번을 잘못 바꿔줬어', '3번 교대 안 했어', '일시정지', '재개'];
+    '김민수 6시 출근', '김민수 쉬러 나오면 퇴근', '김민수 퇴근', '김민수가 5번을 잘못 바꿔줬어', '3번 교대 안 했어', '다음 교대 5분 늦춰', '13:20 교대 13:25로', '일시정지', '재개'];
 
   // ---------- 시각 ----------
   // '15:00' · '3시' · '3시 반' · '3시 30분' · '오후 3시' · '오전 10시 30분' → {at, rest}. 오전·오후가 없으면 가장 가까운 앞으로의 시각
@@ -445,6 +445,50 @@
   // 교대 바로잡기 말 — 질문 말('했어')이 섞여 있어도 바로잡기로 먼저 본다
   const FIX_RE = /잘못|실수|대신|틀리|엉뚱|안\s*했|안\s*바뀌|안\s*들어|안\s*나갔|안\s*갔|바꿔\s*앉|자리\s*(?:가\s*)?바뀌|바뀌어\s*앉/;
 
+  // ---------- 교대 시각 바꾸기 (이번만) ----------
+  // 이 문장이 교대 하나의 시각을 옮기라는 뜻인가 → null(아님) · {problem} · {reset, ns} · {n, to(지금 시각) → 새 시각}
+  //  어느 교대: '다음/이번 교대' = 1 · 'N번째 교대' = N · 앞의 시각이 예정 교대 시각과 같으면 그 교대 · 아니면 다음 교대
+  //  새 시각: 'N분 늦춰/미뤄'(+) · 'N분 당겨'(−) · 시각 둘이면 뒤의 것 · '다음 교대 13:25로'처럼 하나면 그것
+  const PT_WHO = /(다음|이번|(\d{1,2})\s*번째)\s*(?:교대|로테|푸시)/;
+  const PT_SHIFT = /(\d{1,3})\s*분\s*(?:만\s*)?(늦|미뤄|미루|뒤로|연기|당겨|당기|앞당|일찍|빨리|앞으로)/;
+  function pushTimeIntent(clause, s, now) {
+    if (!/교대|로테|푸시/.test(clause) || /간격|마다|주기|출근|퇴근/.test(clause)) return null;
+    if (/\d\s*번(?!\s*째)/.test(clause) || dealersIn(clause, s).length) return null; // 테이블·딜러 일은 다른 갈래
+    const times = [];
+    let rest = clause;
+    for (let k = 0; k < 2; k++) { // findTimes와 달리 뒤 시각이 앞보다 일러도 다음 날로 넘기지 않는다 ('13:25 교대 13:20으로')
+      const t = findTime(rest, now);
+      if (!t) break;
+      times.push(t.at);
+      rest = t.rest;
+    }
+    const who = clause.match(PT_WHO);
+    const shift = rest.match(PT_SHIFT);
+    const reset = /원래대로|원래\s*시각|되돌|돌려/.test(rest);
+    const change = /바꿔|바꾸|옮겨|옮기|변경|으로|로\s*(?:해|하자|바꿔)?\s*$|에\s*(?:해|하자|해줘)?\s*$|시각/.test(rest);
+    if (!shift && !reset && times.length < 2 && !(times.length === 1 && who && change)) return null;
+    if (!s.clock.running) return { problem: '로테이션이 돌 때만 교대 시각을 바꿉니다' };
+    let n = who ? (who[2] ? Number(who[2]) : 1) : null;
+    if (n == null && times.length && (times.length >= 2 || shift || reset)) {
+      const i = E.project(s, 40, now).findIndex(p => p.at === times[0]);
+      if (i < 0) return { problem: `${hhmm(times[0])}에는 예정된 교대가 없습니다 (로테이션 표 머리의 시각을 적어 주세요)` };
+      n = i + 1;
+    }
+    if (reset) {
+      const ns = n != null ? [n] : Array.from({ length: 40 }, (_, i) => i + 1).filter(k => E.pushTimeChanged(s, k));
+      return { reset: true, ns };
+    }
+    if (n == null) n = 1;
+    if (!(n >= 1 && n <= 40)) return { problem: '앞으로 40번째 교대까지만 바꿀 수 있습니다' };
+    if (shift) {
+      const m = Number(shift[1]) * (/늦|미뤄|미루|뒤로|연기/.test(shift[2]) ? 1 : -1);
+      if (!m) return null;
+      return { n, to: at => at + m * MIN };
+    }
+    const target = times[times.length - 1];
+    return { n, to: () => target };
+  }
+
   // ---------- 해석 ----------
   function parse(text, state, now) {
     const steps = [];
@@ -472,7 +516,13 @@
 
       // 0) 예약 취소: '간격 예약 취소' · '7번 예약 취소'
       if (/취소/.test(rest)) {
-        const tn = rest.match(/((?:\d+\s*(?:[-~]\s*\d+)?\s*,?\s*)+)\s*번/);
+        const tn = rest.match(/((?:\d+\s*(?:[-~]\s*\d+)?\s*,?\s*)+)\s*번(?!\s*째)/);
+        if (/시각|시간/.test(rest) && /교대|로테/.test(rest) && !tn) { // '교대 시각 변경 취소' — 이번만 바꾼 시각을 모두 원래대로
+          const ns = Array.from({ length: 40 }, (_, i) => i + 1).filter(k => E.pushTimeChanged(cur, k));
+          ns.forEach(k => add(`${k}번째 교대 시각 원래대로`, (s, t) => E.clearPushTime(s, k, t)));
+          if (!ns.length) notes.push('이번만 바꾼 교대 시각이 없습니다');
+          continue;
+        }
         if (tn) {
           const nos = E.parseNos(tn[1]);
           add(`${E.rangeText(nos)}번 테이블 예약 취소`, (s, t) => nos.reduce((x, no) => {
@@ -556,6 +606,34 @@
           const when = cur.clock.running ? E.project(cur, 12, now).find(p => p.a[d.id] === undefined) : null; // 예정 표로 언제 나오는지
           steps[steps.length - 1].desc += ` (${where}${when ? ` → ${hhmm(when.at)} 교대에 퇴근 예정` : ''})`;
         }
+        continue;
+      }
+
+      // 0-2) 교대 시각 바꾸기 (이번만): '다음 교대 5분 늦춰' · '13:20 교대 13:25로' · '다음 교대 13:25에' · '2번째 교대 10분 당겨' · '다음 교대 원래대로'
+      //   그 교대 하나만 옮기고 뒤 교대는 원래 시각대로 (2026-10-25 사용자 요청). 5분 눈금, 앞뒤 교대 사이로만 — 간격 갈래보다 먼저
+      const pt = pushTimeIntent(clause, cur, now);
+      if (pt) {
+        if (pt.problem) { problems.push(`'${clause}' — ${pt.problem}`); continue; }
+        if (pt.reset) {
+          let any = false;
+          for (const n of pt.ns) {
+            const at0 = (E.project(cur, n, now)[n - 1] || {}).at;
+            if (add(`${at0 ? hhmm(at0) : `${n}번째`} 교대 시각 원래대로`, (s, t) => E.clearPushTime(s, n, t))) any = true;
+          }
+          if (!any) notes.push('이번만 바꾼 교대 시각이 없습니다');
+          continue;
+        }
+        const r = E.pushTimeRange(cur, pt.n, now);
+        if (!r) { problems.push(`'${clause}' — ${pt.n}번째 교대가 예정 표에 없습니다`); continue; }
+        const to = Math.round(pt.to(r.at) / (5 * MIN)) * 5 * MIN;
+        if (to === r.at) { notes.push(`${hhmm(r.at)} 교대는 이미 그 시각입니다`); continue; }
+        if (!(to > r.prev && to < r.after)) {
+          problems.push(`'${clause}' — ${hhmm(r.at)} 교대는 ${pt.n === 1 ? '지금(또는 방금 교대)' : `앞 교대 ${hhmm(r.prev)}`} 뒤, 다음 교대 ${hhmm(r.after)} 전으로만 옮길 수 있습니다 (5분 눈금)`);
+          continue;
+        }
+        const n = pt.n;
+        add(`${hhmm(r.at)} 교대 → ${hhmm(to)} (이번만 — 뒤 교대는 원래 시각대로)`, (s, t) => E.setPushTime(s, n, to, t))
+          || problems.push(`'${clause}' — 그 시각으로는 바꿀 수 없습니다`);
         continue;
       }
 

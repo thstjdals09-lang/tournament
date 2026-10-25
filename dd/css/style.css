@@ -959,6 +959,8 @@ dialog .times-row label { display: inline-flex; gap: 6px; }
 .sched-list { display: grid; gap: 0; max-height: 50vh; overflow: auto; }
 .sched-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--line); }
 .sched-row .acts { display: flex; gap: 6px; margin-left: auto; }
+.sched-time { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; margin: 6px 0 10px; border: 1px solid var(--line); border-radius: 8px; }
+.sched-time small { flex: 1 1 100%; }
 /* 명령 입력칸 */
 .quick .cmd-form { flex: 1 1 100%; }
 .cmd-said { margin: 0 0 8px; }
